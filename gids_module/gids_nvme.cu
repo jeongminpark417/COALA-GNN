@@ -16,6 +16,8 @@
 #include <bam_nvme.h>
 #include <pybind11/stl.h>
 #include "gids_kernel.cu"
+
+#include "set_associative_page_cache.h"
 //#include <bafs_ptr.h>
 
 
@@ -90,11 +92,43 @@ void BAM_Feature_Store<TYPE>::init_controllers(GIDS_Controllers GIDS_ctrl, uint3
 
   cudaMalloc(&d_cpu_access, sizeof(unsigned int));
   cudaMemset(d_cpu_access, 0 , sizeof(unsigned));
-
  
   return;
 }
 
+template <typename TYPE>
+void BAM_Feature_Store<TYPE>::init_set_associative_cache(GIDS_Controllers GIDS_ctrl, uint32_t ps, uint64_t read_off, uint64_t cache_size, uint64_t num_ele, uint64_t num_ssd = 1) {
+
+  numElems = num_ele;
+  read_offset = read_off;
+  n_ctrls = num_ssd;
+  this -> pageSize = ps;
+  this -> dim = ps / sizeof(TYPE);
+  this -> total_access = 0; 
+
+  ctrls = GIDS_ctrl.ctrls;
+
+
+  uint64_t page_size = pageSize;
+  uint64_t n_pages = cache_size * 1024LL*1024/page_size;
+  this -> numPages = n_pages;
+
+  std::cout << "n pages: " << (int)(this->numPages) <<std::endl;
+  std::cout << "page size: " << (int)(this->pageSize) << std::endl;
+  std::cout << "num elements: " << this->numElems << std::endl;
+
+  uint64_t num_ways = 4;
+
+  uint64_t num_sets = n_pages / num_ways;
+  GIDS_SA_handle<TYPE> SA_handle(num_sets, num_ways, page_size, ctrls[0][0], ctrls, cudaDevice);
+
+  cache_ptr = SA_handle.get_ptr();
+
+  cudaMalloc(&d_cpu_access, sizeof(unsigned int));
+  cudaMemset(d_cpu_access, 0 , sizeof(unsigned));
+ 
+  return;
+}
 
 
 
@@ -487,6 +521,7 @@ PYBIND11_MODULE(BAM_Feature_Store, m) {
     py::class_<BAM_Feature_Store<float>>(m, "BAM_Feature_Store_float")
       .def(py::init<>())
       .def("init_controllers", &BAM_Feature_Store<float>::init_controllers)
+      .def("init_set_associative_cache", &BAM_Feature_Store<float>::init_set_associative_cache)
       .def("read_feature", &BAM_Feature_Store<float>::read_feature)
       .def("read_feature_hetero", &BAM_Feature_Store<float>::read_feature_hetero)
 
@@ -513,6 +548,7 @@ PYBIND11_MODULE(BAM_Feature_Store, m) {
     py::class_<BAM_Feature_Store<int64_t>>(m, "BAM_Feature_Store_long")
       .def(py::init<>())
       .def("init_controllers", &BAM_Feature_Store<int64_t>::init_controllers)
+      .def("init_set_associative_cache", &BAM_Feature_Store<int64_t>::init_set_associative_cache)
       .def("read_feature", &BAM_Feature_Store<int64_t>::read_feature)
       .def("read_feature_hetero", &BAM_Feature_Store<int64_t>::read_feature_hetero)
 

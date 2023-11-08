@@ -23,6 +23,9 @@
 #include <page_cache.h>
 #include <queue.h>
 
+#include "set_associative_page_cache.h"
+
+
 //#define TYPE float
 struct GIDS_Controllers {
   const char *const ctrls_paths[6] = {"/dev/libnvm0","/dev/libnvm1","/dev/libnvm2","/dev/libnvm3","/dev/libnvm4","/dev/libnvm5"};
@@ -54,6 +57,8 @@ struct BAM_Feature_Store {
 
 
   GIDS_CPU_buffer<TYPE> CPU_buffer;
+  SA_cache_d_t<TYPE>* cache_ptr;
+
   //GIDS optimization flasg
   bool cpu_buffer_flag = false;
   bool seq_flag = true;
@@ -95,6 +100,8 @@ struct BAM_Feature_Store {
 
 
   void init_controllers(GIDS_Controllers GIDS_ctrl, uint32_t ps, uint64_t r_off, uint64_t num_ele, uint64_t cache_size, 
+                        uint64_t num_ssd);
+  void init_set_associative_cache(GIDS_Controllers GIDS_ctrl, uint32_t ps, uint64_t r_off, uint64_t num_ele, uint64_t cache_size, 
                         uint64_t num_ssd);
 
   void read_feature(uint64_t tensor_ptr, uint64_t index_ptr,int64_t num_index, int dim, int cache_dim, uint64_t key_off);
