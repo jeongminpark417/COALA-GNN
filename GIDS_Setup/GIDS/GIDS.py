@@ -63,14 +63,13 @@ class GIDS_DGLDataLoader(torch.utils.data.DataLoader):
 
     def __init__(self, graph, indices, graph_sampler, batch_size, dim, GIDS, device=None, use_ddp=False,
                  ddp_seed=0, drop_last=False, shuffle=False,
-                 use_alternate_streams=None,
+                 use_alternate_streams=None, 
                  
                  **kwargs):
 
         use_uva = False
         self.GIDS_Loader = GIDS
         self.dim = dim
-
 
         if isinstance(kwargs.get('collate_fn', None), CollateWrapper):
             assert batch_size is None       # must be None
@@ -188,57 +187,15 @@ class GIDS_DGLDataLoader(torch.utils.data.DataLoader):
         self.graph_travel_time = 0.0
 
 
-# class GIDS_DGLDataLoader(dgl.dataloading.DataLoader):
-#     def __init__(self, graph, indices, graph_sampler, batch_size, dim, GIDS_Loader, shuffle=True, drop_last=False, num_workers=0, use_uva=False, pin_prefetcher=None, use_alternate_streams=None):
-#         # Your constructor logic here
-
-#         if not graph._graph.is_pinned():
-#             graph._graph.pin_memory_()
-        
-#         self.dim = dim
-#         self.GIDS_Loader = GIDS_Loader
-#         super().__init__(
-#             graph=graph,
-#             indices=indices,
-#             graph_sampler=graph_sampler,
-#             batch_size=batch_size,
-#             shuffle=shuffle,
-#             drop_last=drop_last,
-#             num_workers=num_workers,
-#             use_uva=use_uva,
-#             pin_prefetcher=pin_prefetcher,
-#             use_alternate_streams=use_alternate_streams
-#         )
-
-#     def __iter__(self):
-#         if self.shuffle:
-#             self.dataset.shuffle()
-#         # When using multiprocessing PyTorch sometimes set the number of PyTorch threads to 1
-#         # when spawning new Python threads.  This drastically slows down pinning features.
-#         num_threads = torch.get_num_threads() if self.num_workers > 0 else None
-#         return _PrefetchingIter(
-#             self, super().__iter__(), GIDS_Loader=self.GIDS_Loader)
- 
-#     def print_stats(self):
-#         self.GIDS_Loader.print_stats()
-
-#     def print_timer(self):
-#         #if(self.bam):
-#         #     print("feature aggregation time test: %f" % self.sample_time)
-#         #print("graph travel time: %f" % self.graph_travel_time)
-#         self.sample_time = 0.0
-#         self.graph_travel_time = 0.0
-
 class GIDS():
     def __init__(self, page_size=4096, off=0, cache_dim = 1024, num_ele = 300*1000*1000*1024, 
-        num_ssd = 1,  ssd_list = None, cache_size = 10,  
+        num_ssd = 1,  ssd_list = None, set_associative_cache=True, cache_size = 10,  num_ways=4,
         ctrl_idx=0, 
         window_buffer=False, wb_size = 8, 
         accumulator_flag = False, 
         long_type=False, 
         heterograph=False,
         heterograph_map=None):
-
         #self.sample_type = "LADIES"
 
         if(long_type):
@@ -261,10 +218,12 @@ class GIDS():
         self.wb_size = wb_size
 
         # Cache Parameters
+        self.set_associative_cache = set_associative_cache
         self.page_size = page_size
         self.off = off
         self.num_ele = num_ele
         self.cache_size = cache_size
+        self.num_ways = num_ways
        
         #True if the graph is heterogenous graph
         self.heterograph = heterograph
@@ -284,17 +243,18 @@ class GIDS():
             self.ssd_list = ssd_list
 
         self.GIDS_controller.init_GIDS_controllers(num_ssd, 1024, 128, self.ssd_list)
-        self.BAM_FS.init_controllers(self.GIDS_controller, page_size, off, cache_size,num_ele, num_ssd)
-        
+
+        if(set_associative_cache):
+            self.BAM_FS.init_set_associative_cache(self.GIDS_controller, page_size, off, cache_size,num_ele, num_ssd, num_ways)
+        else:
+            self.BAM_FS.init_controllers(self.GIDS_controller, page_size, off, cache_size,num_ele, num_ssd)
         self.GIDS_time = 0.0
         self.WB_time = 0.0
 
 
-
-
     # For Sampling GIDS operation
     def init_graph_GIDS(self, page_size, off, cache_size, num_ele, num_ssd):
-        self.graph_GIDS = BAM_Feature_Store.BAM_Feature_Store_long()
+        self.graph_GIDS = BAM_Feature_Store.BAM_Feature_Store_long()        
         self.graph_GIDS.init_controllers(self.GIDS_controller,page_size, off, cache_size, num_ele, num_ssd)
 
     def get_offset_array(self):
@@ -361,8 +321,14 @@ class GIDS():
 
     #Fetching Data from the SSDs
     def fetch_feature(self, dim, it, device):
-        GIDS_time_start = time.time()
+        if(self.set_associative_cache):
+            batch =  self.SA_fetch_feature(dim, it, device)
+        else:
+            batch = self.DM_fetch_feature(dim, it, device)
+        return batch
 
+    def DM_fetch_feature(self, dim, it, device):
+        GIDS_time_start = time.time()
         if(self.window_buffering_flag):
             #Filling up the window buffer
             if(self.wb_init == False):
@@ -551,6 +517,76 @@ class GIDS():
                 return batch
 
 
+    #Fetching Data from the SSDs
+    def SA_fetch_feature(self, dim, it, device):
+        GIDS_time_start = time.time()
+
+        if(self.window_buffering_flag):
+            #Filling up the window buffer
+            if(self.wb_init == False):
+                self.fill_wb(it, self.wb_size)
+                self.wb_init = True
+
+        next_batch = next(it)
+
+        self.window_buffer.append(next_batch)
+        #Update Counters for Windwo Buffering
+        if(self.window_buffering_flag):
+            self.window_buffering(next_batch)
+        
+     
+        if(self.heterograph):
+            batch = self.window_buffer.pop(0)
+            ret_ten = {}
+            index_size_list = []
+            index_ptr_list = []
+            return_torch_list = []
+            key_list = []
+            
+            num_keys = 0
+            for key , v in batch[0].items():
+                if(len(v) == 0):
+                    empty_t = torch.empty((0, dim)).to(self.gids_device).contiguous()
+                    ret_ten[key] = empty_t
+                else:
+                    key_off = 0
+                    if(self.heterograph_map != None):
+                        if (key in self.heterograph_map):
+                            key_off = self.heterograph_map[key]
+                        else:
+                            print("Cannot find key: ", key, " in the heterograph map!")
+                    
+                    g_index = v.to(self.gids_device)
+                    index_size = len(g_index)
+                    index_ptr = g_index.data_ptr()
+                    
+                    return_torch =  torch.zeros([index_size,dim], dtype=torch.float, device=self.gids_device).contiguous()
+                    return_torch_list.append(return_torch.data_ptr())
+                    ret_ten[key] = return_torch
+                    num_keys += 1
+                    index_ptr_list.append(index_ptr)
+                    index_size_list.append(index_size)
+                    key_list.append(key_off)
+
+            self.BAM_FS.read_feature_hetero(num_keys, return_torch_list, index_ptr_list, index_size_list, dim, self.cache_dim, key_list)
+
+            batch.append(ret_ten)
+            self.GIDS_time += time.time() - GIDS_time_start
+            return batch
+
+        else:
+            batch = self.window_buffer.pop(0)
+            index = batch[0].to(self.gids_device)
+            index_size = len(index)
+            index_ptr = index.data_ptr()
+            return_torch =  torch.zeros([index_size,dim], dtype=torch.float, device=self.gids_device).contiguous()
+            self.BAM_FS.SA_read_feature(return_torch.data_ptr(), index_ptr, index_size, dim, self.cache_dim, 0)
+
+            self.GIDS_time += time.time() - GIDS_time_start
+
+            batch.append(return_torch)
+
+            return batch
 
     def print_stats(self):
         print("GIDS time: ", self.GIDS_time)

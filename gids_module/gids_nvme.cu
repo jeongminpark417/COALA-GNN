@@ -97,7 +97,7 @@ void BAM_Feature_Store<TYPE>::init_controllers(GIDS_Controllers GIDS_ctrl, uint3
 }
 
 template <typename TYPE>
-void BAM_Feature_Store<TYPE>::init_set_associative_cache(GIDS_Controllers GIDS_ctrl, uint32_t ps, uint64_t read_off, uint64_t cache_size, uint64_t num_ele, uint64_t num_ssd = 1) {
+void BAM_Feature_Store<TYPE>::init_set_associative_cache(GIDS_Controllers GIDS_ctrl, uint32_t ps, uint64_t read_off, uint64_t cache_size, uint64_t num_ele, uint64_t num_ssd, uint64_t num_ways) {
 
   numElems = num_ele;
   read_offset = read_off;
@@ -107,6 +107,7 @@ void BAM_Feature_Store<TYPE>::init_set_associative_cache(GIDS_Controllers GIDS_c
   this -> total_access = 0; 
 
   ctrls = GIDS_ctrl.ctrls;
+  set_associative_cache = true;
 
 
   uint64_t page_size = pageSize;
@@ -117,22 +118,18 @@ void BAM_Feature_Store<TYPE>::init_set_associative_cache(GIDS_Controllers GIDS_c
   std::cout << "page size: " << (int)(this->pageSize) << std::endl;
   std::cout << "num elements: " << this->numElems << std::endl;
 
-  uint64_t num_ways = 4;
+  //uint64_t num_ways = 4;
 
   uint64_t num_sets = n_pages / num_ways;
-  GIDS_SA_handle<TYPE> SA_handle(num_sets, num_ways, page_size, ctrls[0][0], ctrls, cudaDevice);
+  SA_handle = new GIDS_SA_handle<TYPE>(num_sets, num_ways, page_size, ctrls[0][0], ctrls, cudaDevice);
 
-  cache_ptr = SA_handle.get_ptr();
+  cache_ptr = SA_handle -> get_ptr();
 
   cudaMalloc(&d_cpu_access, sizeof(unsigned int));
   cudaMemset(d_cpu_access, 0 , sizeof(unsigned));
  
   return;
 }
-
-
-
-
 
 
 template <typename TYPE>
@@ -158,31 +155,29 @@ void BAM_Feature_Store<TYPE>::print_stats_no_ctrl(){
 
 template <typename TYPE>
 void BAM_Feature_Store<TYPE>::print_stats(){
-  std::cout << "print stats: ";
-  this->h_pc->print_reset_stats();
-  std::cout << std::endl;
 
-  std::cout << "print array reset: ";
-  this->a->print_reset_stats();
-  std::cout << std::endl;
+  if(!set_associative_cache){
+    std::cout << "print stats: ";
+    this->h_pc->print_reset_stats();
+    std::cout << std::endl;
 
-  for(int i = 0; i < n_ctrls; i++){
- 	std::cout << "print ctrl reset " << i << ": ";
-  	(this->ctrls[i])->print_reset_stats();
-  	std::cout << std::endl;
+    std::cout << "print array reset: ";
+    this->a->print_reset_stats();
+    std::cout << std::endl;
 
   }
+    for(int i = 0; i < n_ctrls; i++){
+    std::cout << "print ctrl reset " << i << ": ";
+      (this->ctrls[i])->print_reset_stats();
+      std::cout << std::endl;
+    }
+  
  
   std::cout << "Kernel Time: \t " << this->kernel_time << std::endl;
   this->kernel_time = 0;
   std::cout << "Total Access: \t " << this->total_access << std::endl;
   this->total_access = 0;
 }
-
-
-
-
-
 
 
 template <typename TYPE>
@@ -288,7 +283,6 @@ void BAM_Feature_Store<TYPE>::read_feature_hetero(int num_iter, const std::vecto
 }
 
 
-
 template <typename TYPE>
 void BAM_Feature_Store<TYPE>::read_feature_merged(int num_iter, const std::vector<uint64_t>&  i_ptr_list, const std::vector<uint64_t>&  i_index_ptr_list,
                                      const std::vector<uint64_t>&   num_index, int dim, int cache_dim=1024) {
@@ -350,9 +344,6 @@ void BAM_Feature_Store<TYPE>::read_feature_merged(int num_iter, const std::vecto
   }
   return;
 }
-
-
-
 
 
 template <typename TYPE>
@@ -420,6 +411,47 @@ void BAM_Feature_Store<TYPE>::read_feature_merged_hetero(int num_iter, const std
 
 
 
+template <typename TYPE>
+void BAM_Feature_Store<TYPE>::SA_read_feature(uint64_t i_ptr, uint64_t i_index_ptr,
+                                     int64_t num_index, int dim, int cache_dim, uint64_t key_off) {
+
+
+  TYPE *tensor_ptr = (TYPE *)i_ptr;
+  int64_t *index_ptr = (int64_t *)i_index_ptr;
+
+  uint64_t b_size = blkSize;
+  uint64_t n_warp = b_size / 32;
+  uint64_t g_size = (num_index+n_warp - 1) / n_warp;
+
+  cuda_err_chk(cudaDeviceSynchronize());
+  auto t1 = Clock::now();
+
+  SA_read_feature_kernel<TYPE><<<g_size, b_size>>>(cache_ptr, tensor_ptr,
+                                                  index_ptr, dim, num_index, cache_dim, key_off);
+  // if(cpu_buffer_flag == false){
+  //   read_feature_kernel<TYPE><<<g_size, b_size>>>(a->d_array_ptr, tensor_ptr,
+  //                                                 index_ptr, dim, num_index, cache_dim, key_off);
+  // }
+  // else{
+  //   read_feature_kernel_with_cpu_backing_memory<<<g_size, b_size>>>(a->d_array_ptr, d_range, tensor_ptr,
+  //                                                 index_ptr, dim, num_index, cache_dim, CPU_buffer, seq_flag,
+  //                                                 d_cpu_access, key_off);
+  // }
+  cuda_err_chk(cudaDeviceSynchronize());
+  cudaMemcpy(&cpu_access_count, d_cpu_access, sizeof(unsigned int), cudaMemcpyDeviceToHost);
+  auto t2 = Clock::now();
+  auto us = std::chrono::duration_cast<std::chrono::microseconds>(
+      t2 - t1); // Microsecond (as int)
+  auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+      t2 - t1); // Microsecond (as int)
+  const float ms_fractional =
+      static_cast<float>(us.count()) / 1000; // Milliseconds (as float)
+
+  kernel_time += ms_fractional;
+  total_access += num_index;
+
+  return;
+}
 
 
 
@@ -524,9 +556,11 @@ PYBIND11_MODULE(BAM_Feature_Store, m) {
       .def("init_set_associative_cache", &BAM_Feature_Store<float>::init_set_associative_cache)
       .def("read_feature", &BAM_Feature_Store<float>::read_feature)
       .def("read_feature_hetero", &BAM_Feature_Store<float>::read_feature_hetero)
-
       .def("read_feature_merged_hetero", &BAM_Feature_Store<float>::read_feature_merged_hetero)
       .def("read_feature_merged", &BAM_Feature_Store<float>::read_feature_merged)
+
+      .def("SA_read_feature", &BAM_Feature_Store<float>::SA_read_feature)
+
       .def("set_window_buffering", &BAM_Feature_Store<float>::set_window_buffering)
       .def("cpu_backing_buffer", &BAM_Feature_Store<float>::cpu_backing_buffer)
       .def("set_cpu_buffer", &BAM_Feature_Store<float>::set_cpu_buffer)
@@ -555,6 +589,7 @@ PYBIND11_MODULE(BAM_Feature_Store, m) {
       .def("read_feature_merged", &BAM_Feature_Store<int64_t>::read_feature_merged)
       .def("read_feature_merged_hetero", &BAM_Feature_Store<int64_t>::read_feature_merged_hetero)
 
+      .def("SA_read_feature", &BAM_Feature_Store<int64_t>::SA_read_feature)
 
       .def("set_window_buffering", &BAM_Feature_Store<int64_t>::set_window_buffering)
       .def("cpu_backing_buffer", &BAM_Feature_Store<int64_t>::cpu_backing_buffer)

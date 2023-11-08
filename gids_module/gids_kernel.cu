@@ -23,6 +23,31 @@ __global__ void read_feature_kernel(array_d_t<T> *dr, T *out_tensor_ptr,
   }
 }
 
+
+template <typename T = float>
+__global__ void SA_read_feature_kernel(SA_cache_d_t<T> *cache, T *out_tensor_ptr,
+                                    int64_t *index_ptr, int dim,
+                                    int64_t num_idx, int cache_dim, uint64_t key_off) {
+
+  uint64_t bid = blockIdx.x;
+  int num_warps = blockDim.x / 32;
+  int warp_id = threadIdx.x / 32;
+  int idx_idx = bid * num_warps + warp_id;
+  if (idx_idx < num_idx) {
+    uint64_t row_index = index_ptr[idx_idx] + key_off;
+    uint64_t tid = threadIdx.x % 32;
+
+
+    for (; tid < dim; tid += 32) {
+      cache->get_data(row_index, out_tensor_ptr + (bid * num_warps + warp_id) * dim);
+      //   dr -> 
+	    // T temp = ptr[(row_index) * cache_dim + tid];
+	    // out_tensor_ptr[(bid * num_warps + warp_id) * dim + tid] = temp;
+    }
+  }
+}
+
+
 template <typename T = float>
 __global__ void read_feature_kernel_with_cpu_backing_memory(array_d_t<T> *dr, range_d_t<T> *range, T *out_tensor_ptr,
                                     int64_t *index_ptr, int dim,

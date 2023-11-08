@@ -537,7 +537,7 @@ struct GIDS_SA_handle{
 
  
         uint64_t cache_size = CL_SIZE_ * num_sets_ * num_ways_;
-        pages_dma = createDma(ctrl.ctrl, NVM_PAGE_ALIGN(CL_SIZE_, 1UL << 16), cudaDevice);
+        pages_dma = createDma(ctrl.ctrl, NVM_PAGE_ALIGN(cache_size, 1UL << 16), cudaDevice);
         base_addr = (uint8_t*) pages_dma.get()->vaddr;
         const uint32_t uints_per_page = ctrl.ctrl->page_size / sizeof(uint64_t);
 
@@ -568,13 +568,14 @@ struct GIDS_SA_handle{
         if (CL_SIZE_ <= pages_dma.get()->page_size) {
             std::cout << "Cond1\n";
             uint64_t how_many_in_one = ctrl.ctrl->page_size/CL_SIZE_;
+
             this->prp1_buf = createBuffer(num_sets_ * num_ways_ * sizeof(uint64_t), cudaDevice);
             prp1 = (uint64_t*) this->prp1_buf.get();
 
-
             std::cout << (num_sets_ * num_ways_) << " " << sizeof(uint64_t) << " " << how_many_in_one << " " << this->pages_dma.get()->n_ioaddrs <<std::endl;
             uint64_t* temp = new uint64_t[how_many_in_one * pages_dma.get()->n_ioaddrs];
-            std::memset(temp, 0, how_many_in_one *  this->pages_dma.get()->n_ioaddrs);
+            std::memset(temp, 0, how_many_in_one *  pages_dma.get()->n_ioaddrs);
+
             if (temp == NULL)
                 std::cout << "NULL\n";
 
@@ -584,8 +585,8 @@ struct GIDS_SA_handle{
                 }
             }
             cuda_err_chk(cudaMemcpy(prp1, temp, num_sets_ * num_ways_ * sizeof(uint64_t), cudaMemcpyHostToDevice));
-            delete temp;
 
+            delete temp;
             prps = false;
         }
 
@@ -647,6 +648,7 @@ struct GIDS_SA_handle{
 
         SA_cache_d_t<T> cache_host(d_set_locks, d_way_locks, num_sets_, num_ways_, CL_SIZE_, keys_, set_cnt_, d_ctrls, n_ctrls, n_blocks_per_page, base_addr, prp1, prp2, prps,
         cache_q_head, cache_q_tail, cache_q_lock, cache_extra_reads);
+
         cuda_err_chk(cudaMemcpy(cache_ptr, &cache_host, sizeof(SA_cache_d_t<T>), cudaMemcpyHostToDevice));
     }
 

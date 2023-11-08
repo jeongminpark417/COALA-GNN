@@ -46,7 +46,8 @@ def track_acc_GIDS(g, args, device, label_array=None):
         window_buffer = args.window_buffer,
         wb_size = args.wb_size,
         accumulator_flag = args.accumulator,
-        cache_dim = args.cache_dim
+        cache_dim = args.cache_dim,
+        set_associative_cache=True
     
     )
     dim = args.emb_size
