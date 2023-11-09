@@ -37,13 +37,14 @@ __global__ void SA_read_feature_kernel(SA_cache_d_t<T> *cache, T *out_tensor_ptr
     uint64_t row_index = index_ptr[idx_idx] + key_off;
     uint64_t tid = threadIdx.x % 32;
 
+    cache->get_data(row_index, out_tensor_ptr + (bid * num_warps + warp_id) * dim);
 
-    for (; tid < dim; tid += 32) {
-      cache->get_data(row_index, out_tensor_ptr + (bid * num_warps + warp_id) * dim);
-      //   dr -> 
-	    // T temp = ptr[(row_index) * cache_dim + tid];
-	    // out_tensor_ptr[(bid * num_warps + warp_id) * dim + tid] = temp;
-    }
+    // for (; tid < dim; tid += 32) {
+    //   cache->get_data(row_index, out_tensor_ptr + (bid * num_warps + warp_id) * dim);
+    //   //   dr -> 
+	  //   // T temp = ptr[(row_index) * cache_dim + tid];
+	  //   // out_tensor_ptr[(bid * num_warps + warp_id) * dim + tid] = temp;
+    // }
   }
 }
 
@@ -153,3 +154,9 @@ __global__ void write_feature_kernel(Controller** ctrls, page_cache_d_t* pc, arr
 }
 
 
+template <typename T = float>
+__global__ 
+void
+print_kernel(SA_cache_d_t<T> *cache){
+  cache -> print_stats();
+}

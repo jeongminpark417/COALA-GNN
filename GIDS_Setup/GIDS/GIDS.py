@@ -195,7 +195,8 @@ class GIDS():
         accumulator_flag = False, 
         long_type=False, 
         heterograph=False,
-        heterograph_map=None):
+        heterograph_map=None,
+        device_id=0):
         #self.sample_type = "LADIES"
 
         if(long_type):
@@ -231,8 +232,9 @@ class GIDS():
         self.graph_GIDS = None
 
         self.cache_dim = cache_dim
-        self.gids_device="cuda:" + str(ctrl_idx)
-
+        #self.gids_device="cuda:" + str(ctrl_idx)
+        self.gids_device="cuda:" + str(device_id)
+        
         
         self.GIDS_controller = BAM_Feature_Store.GIDS_Controllers()
 
@@ -242,7 +244,7 @@ class GIDS():
         else:
             self.ssd_list = ssd_list
 
-        self.GIDS_controller.init_GIDS_controllers(num_ssd, 1024, 128, self.ssd_list)
+        self.GIDS_controller.init_GIDS_controllers(num_ssd, 1024, 128, self.ssd_list, device_id)
 
         if(set_associative_cache):
             self.BAM_FS.init_set_associative_cache(self.GIDS_controller, page_size, off, cache_size,num_ele, num_ssd, num_ways)

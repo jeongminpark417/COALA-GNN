@@ -24,11 +24,12 @@
 typedef std::chrono::high_resolution_clock Clock;
 
 void GIDS_Controllers::init_GIDS_controllers(uint32_t num_ctrls, uint64_t q_depth, uint64_t num_q, 
-                          const std::vector<int>& ssd_list){
+                          const std::vector<int>& ssd_list, uint32_t device){
 
   n_ctrls = num_ctrls;
   queueDepth = q_depth;
   numQueues = num_q;
+  cudaDevice = device;
 
   for (size_t i = 0; i < n_ctrls; i++) {
     ctrls.push_back(new Controller(ctrls_paths[ssd_list[i]], nvmNamespace, cudaDevice, queueDepth, numQueues));
@@ -62,6 +63,8 @@ void BAM_Feature_Store<TYPE>::init_controllers(GIDS_Controllers GIDS_ctrl, uint3
   this -> total_access = 0; 
 
   ctrls = GIDS_ctrl.ctrls;
+
+  cudaDevice = GIDS_ctrl.cudaDevice;
 
 
   uint64_t page_size = pageSize;
@@ -107,6 +110,8 @@ void BAM_Feature_Store<TYPE>::init_set_associative_cache(GIDS_Controllers GIDS_c
   this -> total_access = 0; 
 
   ctrls = GIDS_ctrl.ctrls;
+  cudaDevice = GIDS_ctrl.cudaDevice;
+
   set_associative_cache = true;
 
 
@@ -121,6 +126,8 @@ void BAM_Feature_Store<TYPE>::init_set_associative_cache(GIDS_Controllers GIDS_c
   //uint64_t num_ways = 4;
 
   uint64_t num_sets = n_pages / num_ways;
+  std::cout << "n sets: " << (int)(this->numPages) <<std::endl;
+  std::cout << "n ways: " << (int)(this->pageSize) << std::endl;
   SA_handle = new GIDS_SA_handle<TYPE>(num_sets, num_ways, page_size, ctrls[0][0], ctrls, cudaDevice);
 
   cache_ptr = SA_handle -> get_ptr();
@@ -166,6 +173,12 @@ void BAM_Feature_Store<TYPE>::print_stats(){
     std::cout << std::endl;
 
   }
+  else{
+    print_kernel<TYPE><<<1,1>>>(cache_ptr);
+	  cuda_err_chk(cudaDeviceSynchronize())
+  }
+
+
     for(int i = 0; i < n_ctrls; i++){
     std::cout << "print ctrl reset " << i << ": ";
       (this->ctrls[i])->print_reset_stats();

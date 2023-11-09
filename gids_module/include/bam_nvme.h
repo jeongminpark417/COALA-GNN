@@ -39,7 +39,7 @@ struct GIDS_Controllers {
   uint32_t nvmNamespace = 1;
   
   //member functions
-  void init_GIDS_controllers(uint32_t num_ctrls, uint64_t q_depth, uint64_t num_q,  const std::vector<int>& ssd_list);
+  void init_GIDS_controllers(uint32_t num_ctrls, uint64_t q_depth, uint64_t num_q,  const std::vector<int>& ssd_list, uint32_t device);
 
 };
 

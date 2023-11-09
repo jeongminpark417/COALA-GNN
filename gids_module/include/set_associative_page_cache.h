@@ -165,10 +165,17 @@ struct SA_cache_d_t {
     simt::atomic<uint64_t, simt::thread_scope_device>* extra_reads;
 
 
+    simt::atomic<uint64_t, simt::thread_scope_device> double_read;
+    simt::atomic<uint64_t, simt::thread_scope_device> hit_cnt;
+    simt::atomic<uint64_t, simt::thread_scope_device> miss_cnt;
+
+
+
     SA_cache_d_t(seqlock* set_locks, seqlock* way_locks,uint64_t n_sets, uint64_t n_ways, uint64_t cl_size, uint64_t* keys, uint32_t* set_cnt,
                  Controller** d_ctrls, uint32_t n_ctrls, uint64_t n_blocks_per_page, uint8_t* base_addr, uint64_t* prp1, uint64_t* prp2, bool prps,
                  simt::atomic<uint64_t, simt::thread_scope_device>* queue_head, simt::atomic<uint64_t, simt::thread_scope_device>* queue_tail, 
-                 simt::atomic<uint64_t, simt::thread_scope_device>* queue_lock, simt::atomic<uint64_t, simt::thread_scope_device>* queue_extra_reads                 ) :
+                 simt::atomic<uint64_t, simt::thread_scope_device>* queue_lock, simt::atomic<uint64_t, simt::thread_scope_device>* queue_extra_reads
+                 ) :
     set_locks_(set_locks),
     way_locks_(way_locks),
     num_sets(n_sets),
@@ -187,7 +194,20 @@ struct SA_cache_d_t {
     q_tail(queue_tail),
     q_lock(queue_lock),
     extra_reads(queue_extra_reads)
-    {}
+    {
+        double_read = 0;
+        hit_cnt = 0;
+        miss_cnt = 0;
+    }
+
+    __forceinline__
+    __device__
+    void
+    print_stats(){
+        printf("hit count: %llu\n", hit_cnt);        
+        printf("miss count: %llu\n", miss_cnt);        
+        printf("double reads: %llu\n", double_read);        
+    }
 
 
     __forceinline__
@@ -406,11 +426,22 @@ struct SA_cache_d_t {
                         way_after = way_lock->read_busy_unlock();
                     }
                     way_after = __shfl_sync(mask, way_after, warp_leader);
+
+                    if(lane == warp_leader){
+                        if(hit && (way_after != way_before)){
+                            printf("double write\n");
+                            double_read.fetch_add(1, simt::memory_order_relaxed);
+                        }
+
+                    }
+
+
                     if(!done)
                         done = hit && (way_before == way_after);
+
                     unsigned not_done_mask = __ballot_sync(mask, !done);
                     if(not_done_mask == 0){
-
+                        if(lane == warp_leader) hit_cnt.fetch_add(1, simt::memory_order_relaxed);
                         return;
                     }
 
@@ -429,12 +460,12 @@ struct SA_cache_d_t {
         __syncwarp(mask);
 
         //EVICTION
-        uint32_t way = evict(set_id, evict_policy);
-
+        uint32_t way;
         if(lane == warp_leader) {
+            way = evict(set_id, evict_policy);
             (cur_cl_seqlock + way) -> write_busy_lock();
         }
-        __syncwarp(mask);
+        way = __shfl_sync(mask, way, warp_leader);
 
         //Check
         keys_[set_offset + way] = cl_id;
@@ -445,13 +476,13 @@ struct SA_cache_d_t {
         __syncwarp(mask);
 
         //HANDLE MISS
-        //read_page();
+
         uint32_t queue;
         if(lane == warp_leader) {
             queue = get_smid() % (d_ctrls_[0]->n_qps);
+            read_page(cl_id, set_offset + way, queue);
         }
-        queue = __shfl_sync(mask, queue, warp_leader);
-        read_page(cl_id, set_offset + way, queue);
+         //queue = __shfl_sync(mask, queue, warp_leader);
 
         __syncwarp(mask);
 
@@ -462,6 +493,8 @@ struct SA_cache_d_t {
 
         void* src = ((void*)base_addr_)+ (set_offset + way) * CL_SIZE;
         warp_memcpy<T>(src, output_ptr, CL_SIZE, mask);
+        if(lane == warp_leader) miss_cnt.fetch_add(1, simt::memory_order_relaxed);
+
         __syncwarp(mask);
 
         if(lane == warp_leader) {
@@ -508,6 +541,8 @@ struct GIDS_SA_handle{
     BufferPtr q_lock_buf;
     BufferPtr extra_reads_buf;
 
+    BufferPtr double_reads_buf;
+
     BufferPtr d_ctrls_buff;
 
 
@@ -548,13 +583,16 @@ struct GIDS_SA_handle{
         q_lock_buf = createBuffer(sizeof(simt::atomic<uint64_t, simt::thread_scope_device>), cudaDevice);
         extra_reads_buf = createBuffer(sizeof(simt::atomic<uint64_t, simt::thread_scope_device>), cudaDevice);
         
+
+
         auto cache_ctrl_counter = (simt::atomic<uint64_t, simt::thread_scope_device>*)ctrl_counter_buf.get();
 
         auto cache_q_head = (simt::atomic<uint64_t, simt::thread_scope_device>*)q_head_buf.get();
         auto cache_q_tail = (simt::atomic<uint64_t, simt::thread_scope_device>*)q_tail_buf.get();
         auto cache_q_lock = (simt::atomic<uint64_t, simt::thread_scope_device>*)q_lock_buf.get();
         auto cache_extra_reads = (simt::atomic<uint64_t, simt::thread_scope_device>*)extra_reads_buf.get();
-        
+
+
         uint32_t n_ctrls = ctrls.size();
         d_ctrls_buff = createBuffer(n_ctrls * sizeof(Controller*), cudaDevice);
         auto d_ctrls = (Controller**) d_ctrls_buff.get();
