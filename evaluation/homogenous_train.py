@@ -47,7 +47,10 @@ def track_acc_GIDS(g, args, device, label_array=None):
         wb_size = args.wb_size,
         accumulator_flag = args.accumulator,
         cache_dim = args.cache_dim,
-        set_associative_cache=True
+        set_associative_cache=True,
+        num_ways=32,
+        fan_out = [int(fanout) for fanout in args.fan_out.split(',')],
+        batch_size = args.batch_size
     
     )
     dim = args.emb_size
@@ -117,7 +120,7 @@ def track_acc_GIDS(g, args, device, label_array=None):
         lr=args.learning_rate, weight_decay=args.decay
         )
 
-    warm_up_iter = 100
+    warm_up_iter = 300
     # Setup is Done
     for epoch in tqdm.tqdm(range(args.epochs)):
         epoch_start = time.time()
@@ -130,9 +133,10 @@ def track_acc_GIDS(g, args, device, label_array=None):
         transfer_time = 0
         e2e_time = 0
         e2e_time_start = time.time()
+        epoch_time_start = time.time()
 
         for step, (input_nodes, seeds, blocks, ret) in enumerate(train_dataloader):
-            #print("step: ", step)
+            print("step: ", step)
             if(step == warm_up_iter):
                 print("warp up done")
                 train_dataloader.print_stats()
@@ -181,7 +185,9 @@ def track_acc_GIDS(g, args, device, label_array=None):
                 #Just testing 100 iterations remove the next line if you do not want to halt
                 return None
 
-
+        epoch_time = time.time() - epoch_time_start
+        print("epoch time: ", epoch_time)
+        train_dataloader.print_stats()
        
   
     # Evaluation

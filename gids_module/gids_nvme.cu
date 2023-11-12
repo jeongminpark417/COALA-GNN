@@ -112,6 +112,8 @@ void BAM_Feature_Store<TYPE>::init_set_associative_cache(GIDS_Controllers GIDS_c
   ctrls = GIDS_ctrl.ctrls;
   cudaDevice = GIDS_ctrl.cudaDevice;
 
+  cudaSetDevice( cudaDevice );
+
   set_associative_cache = true;
 
 
@@ -432,7 +434,7 @@ void BAM_Feature_Store<TYPE>::SA_read_feature(uint64_t i_ptr, uint64_t i_index_p
   TYPE *tensor_ptr = (TYPE *)i_ptr;
   int64_t *index_ptr = (int64_t *)i_index_ptr;
 
-  uint64_t b_size = blkSize;
+  uint64_t b_size = 32;
   uint64_t n_warp = b_size / 32;
   uint64_t g_size = (num_index+n_warp - 1) / n_warp;
 
@@ -465,6 +467,146 @@ void BAM_Feature_Store<TYPE>::SA_read_feature(uint64_t i_ptr, uint64_t i_index_p
 
   return;
 }
+
+
+
+template <typename TYPE>
+void BAM_Feature_Store<TYPE>::SA_read_feature_dist( const std::vector<uint64_t>&  i_return_ptr_list, const std::vector<uint64_t>&  i_index_ptr_list,
+const std::vector<uint64_t>&  index_size_list, int num_gpu, int dim, int cache_dim, uint64_t key_off) {
+
+
+  cudaStream_t streams[num_gpu];
+  for (int i = 0; i < num_gpu; i++) {
+      cudaStreamCreate(&streams[i]);
+  }
+  
+  cuda_err_chk(cudaDeviceSynchronize());
+  auto t1 = Clock::now();
+
+  for (int i = 0; i < num_gpu; i++) {
+      TYPE *tensor_ptr = (TYPE *)(i_return_ptr_list[i]);
+      int64_t *index_ptr = (int64_t *)(i_index_ptr_list[i]);
+      uint64_t index_size = index_size_list[i];
+
+      uint64_t b_size = 32;
+      uint64_t n_warp = b_size / 32;
+      uint64_t g_size = (index_size+n_warp - 1) / n_warp;
+
+      SA_read_feature_kernel<TYPE><<<g_size, b_size, 0, streams[i]>>>(cache_ptr, tensor_ptr,
+                                                index_ptr, dim, index_size, cache_dim, key_off);
+      total_access += index_size;
+  }
+
+  cuda_err_chk(cudaDeviceSynchronize());
+  auto t2 = Clock::now();
+  auto us = std::chrono::duration_cast<std::chrono::microseconds>(
+      t2 - t1); // Microsecond (as int)
+  auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+      t2 - t1); // Microsecond (as int)
+  const float ms_fractional =
+      static_cast<float>(us.count()) / 1000; // Milliseconds (as float)
+
+  kernel_time += ms_fractional;
+
+  return;
+}
+
+
+
+template <typename TYPE>
+void BAM_Feature_Store<TYPE>::gather_feature_list(uint64_t i_return_ptr, const std::vector<uint64_t>&  i_return_ptr_list, const std::vector<uint64_t>&  index_size_list, 
+                                            int num_gpu, int dim, int my_rank){
+
+  TYPE* final_tensor_ptr = (TYPE *)i_return_ptr;
+ cudaStream_t streams[num_gpu];
+  for (int i = 0; i < num_gpu; i++) {
+      cudaStreamCreate(&streams[i]);
+  }
+  
+  cuda_err_chk(cudaDeviceSynchronize());
+  auto t1 = Clock::now();
+
+  for (int i = 0; i < num_gpu; i++) {
+    TYPE* src_tensor_ptr = (TYPE *)(i_return_ptr_list[i]);
+    uint64_t index_size = index_size_list[i];
+
+    uint64_t b_size = blkSize;
+   // uint64_t n_warp = b_size / 32;
+    //uint64_t g_size = (index_size+n_warp - 1) / n_warp;
+    uint64_t g_size = index_size;
+    gather_feature_kernel<TYPE><<<g_size, b_size, 0, streams[i]>>>(final_tensor_ptr, src_tensor_ptr,
+                                                d_meta_buffer, dim, index_size, i, my_rank);
+
+  }
+
+  cuda_err_chk(cudaDeviceSynchronize());
+  auto t2 = Clock::now();
+
+
+}
+
+
+
+
+template <typename TYPE>
+void BAM_Feature_Store<TYPE>::split_node_list_init(uint64_t i_index_ptr, int64_t num_gpu,
+                                              int64_t index_size, uint64_t i_index_pointer_list){
+    int64_t* index_ptr = (int64_t *)i_index_ptr;
+    uint64_t* index_pointer_list = (uint64_t *) i_index_pointer_list;
+    
+    size_t g_size = (index_size + 1023)/1024;
+
+    split_node_list_init_kernel<TYPE><<<g_size,1024>>>(index_ptr, index_pointer_list, num_gpu, index_size);
+    cuda_err_chk(cudaDeviceSynchronize());
+}
+
+template <typename TYPE>
+void BAM_Feature_Store<TYPE>::split_node_list(uint64_t i_index_ptr, int64_t num_gpu, 
+                                              int64_t index_size, uint64_t i_bucket_ptr_list, uint64_t i_index_pointer_list){
+    int64_t* index_ptr = (int64_t *)i_index_ptr;
+    uint64_t* index_pointer_list = (uint64_t *) i_index_pointer_list;
+    uint64_t* bucket_ptr_list = (uint64_t *) i_bucket_ptr_list;
+
+    size_t g_size = (index_size + 1023)/1024;
+
+    split_node_list_kernel<TYPE><<<g_size,1024>>>(index_ptr, bucket_ptr_list, index_pointer_list, num_gpu, index_size, d_meta_buffer);
+    cuda_err_chk(cudaDeviceSynchronize());
+}
+
+
+template <typename TYPE>
+void BAM_Feature_Store<TYPE>::print_meta_buffer(const std::vector<uint64_t>&  index_size_list, int num_gpu, int rank ){
+
+  for(int i = 0; i < num_gpu; i++){
+    uint64_t meta_len = index_size_list[i];
+    print_meta_buffer_kernel<TYPE><<<1,1>>>(d_meta_buffer, i, meta_len, rank);
+  }
+    cuda_err_chk(cudaDeviceSynchronize());
+
+}
+
+
+
+
+template <typename TYPE>
+void BAM_Feature_Store<TYPE>::reset_node_counter(const std::vector<uint64_t>&  i_index_pointer_list, int num_gpu){
+
+    for(int i = 0; i < num_gpu; i++){
+      uint64_t i_add = i_index_pointer_list[i];
+      void* add = (void*) i_add;
+      cudaMemset(add, 0, sizeof(int64_t));
+    }
+}
+
+template <typename TYPE>
+void BAM_Feature_Store<TYPE>::create_meta_buffer(uint64_t num_gpu, uint64_t max_size){
+  for(int i = 0; i < num_gpu; i++){
+    cudaMalloc(&(meta_buffer[i]), sizeof(uint64_t) * max_size);
+  }
+  cudaMalloc(&d_meta_buffer, sizeof(uint64_t*) * num_gpu);
+  cudaMemcpy(d_meta_buffer, meta_buffer, sizeof(uint64_t*) * num_gpu, cudaMemcpyHostToDevice);
+}
+                                      
 
 
 
@@ -573,6 +715,13 @@ PYBIND11_MODULE(BAM_Feature_Store, m) {
       .def("read_feature_merged", &BAM_Feature_Store<float>::read_feature_merged)
 
       .def("SA_read_feature", &BAM_Feature_Store<float>::SA_read_feature)
+      .def("SA_read_feature_dist", &BAM_Feature_Store<float>::SA_read_feature_dist)
+
+      .def("split_node_list_init", &BAM_Feature_Store<float>::split_node_list_init)
+      .def("split_node_list", &BAM_Feature_Store<float>::split_node_list)
+      .def("reset_node_counter", &BAM_Feature_Store<float>::reset_node_counter)
+      .def("create_meta_buffer", &BAM_Feature_Store<float>::create_meta_buffer)
+      .def("gather_feature_list", &BAM_Feature_Store<float>::gather_feature_list)
 
       .def("set_window_buffering", &BAM_Feature_Store<float>::set_window_buffering)
       .def("cpu_backing_buffer", &BAM_Feature_Store<float>::cpu_backing_buffer)
@@ -588,7 +737,8 @@ PYBIND11_MODULE(BAM_Feature_Store, m) {
       .def("get_cpu_access_count", &BAM_Feature_Store<float>::get_cpu_access_count)
       .def("flush_cpu_access_count", &BAM_Feature_Store<float>::flush_cpu_access_count)
 
-      .def("print_stats", &BAM_Feature_Store<float>::print_stats);
+      .def("print_stats", &BAM_Feature_Store<float>::print_stats)
+      .def("print_meta_buffer", &BAM_Feature_Store<float>::print_meta_buffer);
 
 
 
@@ -603,6 +753,15 @@ PYBIND11_MODULE(BAM_Feature_Store, m) {
       .def("read_feature_merged_hetero", &BAM_Feature_Store<int64_t>::read_feature_merged_hetero)
 
       .def("SA_read_feature", &BAM_Feature_Store<int64_t>::SA_read_feature)
+      .def("SA_read_feature_dist", &BAM_Feature_Store<int64_t>::SA_read_feature_dist)
+
+
+      .def("split_node_list_init", &BAM_Feature_Store<int64_t>::split_node_list_init)
+      .def("split_node_list", &BAM_Feature_Store<int64_t>::split_node_list)
+      .def("reset_node_counter", &BAM_Feature_Store<int64_t>::reset_node_counter)
+      .def("create_meta_buffer", &BAM_Feature_Store<int64_t>::create_meta_buffer)
+      .def("gather_feature_list", &BAM_Feature_Store<int64_t>::gather_feature_list)
+
 
       .def("set_window_buffering", &BAM_Feature_Store<int64_t>::set_window_buffering)
       .def("cpu_backing_buffer", &BAM_Feature_Store<int64_t>::cpu_backing_buffer)
@@ -619,7 +778,8 @@ PYBIND11_MODULE(BAM_Feature_Store, m) {
       .def("flush_cpu_access_count", &BAM_Feature_Store<int64_t>::flush_cpu_access_count)
 
 
-      .def("print_stats", &BAM_Feature_Store<int64_t>::print_stats);
+      .def("print_stats", &BAM_Feature_Store<int64_t>::print_stats)
+      .def("print_meta_buffer", &BAM_Feature_Store<int64_t>::print_meta_buffer);
 
 
 

@@ -9,6 +9,8 @@ __global__ void read_feature_kernel(array_d_t<T> *dr, T *out_tensor_ptr,
   int num_warps = blockDim.x / 32;
   int warp_id = threadIdx.x / 32;
   int idx_idx = bid * num_warps + warp_id;
+
+
   if (idx_idx < num_idx) {
  	    bam_ptr<T> ptr(dr);
 
@@ -38,14 +40,16 @@ __global__ void SA_read_feature_kernel(SA_cache_d_t<T> *cache, T *out_tensor_ptr
     uint64_t tid = threadIdx.x % 32;
 
     cache->get_data(row_index, out_tensor_ptr + (bid * num_warps + warp_id) * dim);
-
-    // for (; tid < dim; tid += 32) {
-    //   cache->get_data(row_index, out_tensor_ptr + (bid * num_warps + warp_id) * dim);
-    //   //   dr -> 
-	  //   // T temp = ptr[(row_index) * cache_dim + tid];
-	  //   // out_tensor_ptr[(bid * num_warps + warp_id) * dim + tid] = temp;
-    // }
   }
+  
+  // if(bid == 0 ){
+  //   T temp[1024];
+  //   cache->get_data(6145, temp);
+  //   if(threadIdx.x == 0){
+  //     printf("6145 temp: %f\n", temp[0]);
+  //   }
+  // }
+
 }
 
 
@@ -152,6 +156,87 @@ __global__ void write_feature_kernel(Controller** ctrls, page_cache_d_t* pc, arr
       ptr[idx + offset] = in_tensor_ptr[idx];
     }
 }
+
+
+template <typename T = float>
+__global__ void 
+split_node_list_init_kernel(int64_t* index_ptr, uint64_t* index_pointer_list,  int64_t num_gpu,  int64_t index_size){
+  uint64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+  if(idx < index_size){
+    int64_t cur_node = index_ptr[idx];
+    int64_t gpu_id = cur_node % num_gpu;
+    uint64_t counter_add = (index_pointer_list[gpu_id]);
+    atomicAdd((unsigned long long int*) (index_pointer_list[gpu_id]), (unsigned long long int)1);
+  }
+}
+
+template <typename T = float>
+__global__ void 
+split_node_list_kernel(int64_t* index_ptr, uint64_t* dist_index_ptr,  uint64_t* index_pointer_list,  int64_t num_gpu, int64_t index_size, uint64_t** meta_buffer_ptr){
+  uint64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+  if(idx < index_size){
+    int64_t cur_node = index_ptr[idx];
+    int64_t gpu_id = cur_node % num_gpu;
+    uint64_t counter_add = (index_pointer_list[gpu_id]);
+    unsigned long long int enq_idx = atomicAdd((unsigned long long int*) (index_pointer_list[gpu_id]), (unsigned long long int)1);
+
+    int64_t* dist_index = (int64_t*) (dist_index_ptr[gpu_id]);
+
+    meta_buffer_ptr[gpu_id][enq_idx] = idx;
+    dist_index[enq_idx] = cur_node;
+
+  }
+
+}
+
+
+template <typename T = float>
+ __forceinline__
+__device__
+void block_memcpy(void* dst, void* src, size_t size){
+     T* src_ptr = (T*) src;
+     T* dst_ptr = (T*) dst;
+     
+     uint32_t count = blockDim.x;     
+     uint32_t my_id = threadIdx.x;
+
+     for(; my_id < size; my_id += count){
+          dst_ptr[my_id] =  src_ptr[my_id]; 
+     }
+ }
+
+
+
+template <typename T = float>
+__global__ 
+void 
+gather_feature_kernel(T *out_tensor_ptr, T* src_tensor_ptr, uint64_t** meta_buffer_list, int dim, int64_t num_idx, int rank, int my_rank){
+
+  uint64_t r_idx = blockIdx.x;
+  uint64_t* meta_buffer = meta_buffer_list[rank];
+  if(r_idx < num_idx){
+    uint64_t dst_idx = meta_buffer[r_idx];
+    // if(dst_idx == 1 && threadIdx.x == 0) {
+    //   printf("my rank: %i src rank:%i r_idx:%llu src data 1: %f 2: %f\n", rank, my_rank, (unsigned long long) r_idx, (float) ((src_tensor_ptr + r_idx * dim)[0]),  (float) ((src_tensor_ptr + r_idx * dim)[1]));
+    // }
+    block_memcpy<T>((void*) (out_tensor_ptr + dst_idx * dim), (void*)(src_tensor_ptr + r_idx * dim), dim * sizeof(T) / sizeof(T) );
+  }
+
+
+}
+
+template <typename T = float>
+__global__ 
+void
+print_meta_buffer_kernel( uint64_t** d_meta_buffer, uint64_t gpu_id, uint64_t meta_len, uint64_t rank){
+    uint64_t* meta_buffer = d_meta_buffer[gpu_id];
+    for(int i = 0; i < meta_len; i++){
+      printf("rank: %llu meta idx: %llu\n", (unsigned long long) rank, meta_buffer[i]);
+    }
+
+}
+
+
 
 
 template <typename T = float>

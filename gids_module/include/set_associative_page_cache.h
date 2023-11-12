@@ -429,7 +429,6 @@ struct SA_cache_d_t {
 
                     if(lane == warp_leader){
                         if(hit && (way_after != way_before)){
-                            printf("double write\n");
                             double_read.fetch_add(1, simt::memory_order_relaxed);
                         }
 

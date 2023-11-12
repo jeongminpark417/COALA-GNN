@@ -4,7 +4,7 @@ import sklearn.metrics
 import torch, torch.nn as nn, torch.optim as optim
 import time, tqdm, numpy as np
 from models import *
-from dataloader import IGB260MDGLDataset, OGBDGLDataset
+from dataloader import IGB260MDGLDataset, OGBDGLDataset, SharedIGB260MDGLDataset
 import csv 
 import warnings
 
@@ -48,6 +48,7 @@ def print_times(transfer_time, train_time, e2e_time):
     print("e2e time: ", e2e_time)
 
 def track_acc_Multi_GIDS(rank, world_size, g, args, label_array=None):
+    print("Rank: ", rank, " GNN trainign starts")
 
     init_process_group(world_size, rank)
     device = torch.device('cuda:{:d}'.format(rank))
@@ -64,9 +65,15 @@ def track_acc_Multi_GIDS(rank, world_size, g, args, label_array=None):
         wb_size = args.wb_size,
         accumulator_flag = args.accumulator,
         cache_dim = args.cache_dim,
-        set_associative_cache=False,
+        set_associative_cache=True,
+        num_ways=32,
         ssd_list = [rank],
-        device_id=rank
+        device_id = rank,
+        rank = rank, 
+        world_size = world_size,
+        use_ddp=True,
+        fan_out = [int(fanout) for fanout in args.fan_out.split(',')],
+        batch_size = args.batch_size
     
     )
     dim = args.emb_size
@@ -87,13 +94,16 @@ def track_acc_Multi_GIDS(rank, world_size, g, args, label_array=None):
                [int(fanout) for fanout in args.fan_out.split(',')]
                )
 
-    g.ndata['features'] = g.ndata['feat']
+    # g.ndata['features'] = g.ndata['feat']
     g.ndata['labels'] = g.ndata['label']
 
     train_nid = torch.nonzero(g.ndata['train_mask'], as_tuple=True)[0]
     val_nid = torch.nonzero(g.ndata['val_mask'], as_tuple=True)[0]
     test_nid = torch.nonzero(g.ndata['test_mask'], as_tuple=True)[0]
-    in_feats = g.ndata['features'].shape[1]
+    #in_feats = g.ndata['features'].shape[1]
+    in_feats = dim
+    print("in feats: ", in_feats)
+
 
     train_dataloader = GIDS_DGLDataLoader(
         g,
@@ -139,7 +149,7 @@ def track_acc_Multi_GIDS(rank, world_size, g, args, label_array=None):
 
     model = DDP(model,  device_ids=[rank])
 
-    warm_up_iter = 100
+    warm_up_iter = 200
     # Setup is Done
     for epoch in tqdm.tqdm(range(args.epochs)):
         epoch_start = time.time()
@@ -156,7 +166,10 @@ def track_acc_Multi_GIDS(rank, world_size, g, args, label_array=None):
         epoch_time_start = time.time()
 
         for step, (input_nodes, seeds, blocks, ret) in enumerate(train_dataloader):
-            print("rank: ", rank, "step: ", step)
+            if(step % 10 == 0):
+                print("rank: ", rank, "step: ", step)
+            # if(step == 2):
+            #     break
             if(step == warm_up_iter):
                 print("warp up done")
                 train_dataloader.print_stats()
@@ -207,32 +220,32 @@ def track_acc_Multi_GIDS(rank, world_size, g, args, label_array=None):
         
         epoch_time = time.time() - epoch_time_start
         print("epoch time: ", epoch_time)
-
+        train_dataloader.print_stats()
 
        
   
     # Evaluation
 
-    model.eval()
-    predictions = []
-    labels = []
-    with torch.no_grad():
-        for _, _, blocks in test_dataloader:
-            blocks = [block.to(device) for block in blocks]
-            inputs = blocks[0].srcdata['feat']
+    # model.eval()
+    # predictions = []
+    # labels = []
+    # with torch.no_grad():
+    #     for _, _, blocks in test_dataloader:
+    #         blocks = [block.to(device) for block in blocks]
+    #         inputs = blocks[0].srcdata['feat']
      
-            if(args.data == 'IGB'):
-                labels.append(blocks[-1].dstdata['label'].cpu().numpy())
-            elif(args.data == 'OGB'):
-                out_label = torch.index_select(label_array, 0, b[1]).flatten()
-                labels.append(out_label.numpy())
-            predict = model(blocks, inputs).argmax(1).cpu().numpy()
-            predictions.append(predict)
+    #         if(args.data == 'IGB'):
+    #             labels.append(blocks[-1].dstdata['label'].cpu().numpy())
+    #         elif(args.data == 'OGB'):
+    #             out_label = torch.index_select(label_array, 0, b[1]).flatten()
+    #             labels.append(out_label.numpy())
+    #         predict = model(blocks, inputs).argmax(1).cpu().numpy()
+    #         predictions.append(predict)
 
-        predictions = np.concatenate(predictions)
-        labels = np.concatenate(labels)
-        test_acc = sklearn.metrics.accuracy_score(labels, predictions)*100
-    print("Test Acc {:.2f}%".format(test_acc))
+    #     predictions = np.concatenate(predictions)
+    #     labels = np.concatenate(labels)
+    #     test_acc = sklearn.metrics.accuracy_score(labels, predictions)*100
+    # print("Test Acc {:.2f}%".format(test_acc))
 
 
 
@@ -318,14 +331,14 @@ if __name__ == '__main__':
     device = f'cuda:' + str(args.device) if torch.cuda.is_available() else 'cpu'
     if(args.data == 'IGB'):
         print("Dataset: IGB")
-        dataset = IGB260MDGLDataset(args)
+        dataset = SharedIGB260MDGLDataset(args)
         g = dataset[0]
-        g  = g.formats('csc')
+       # g  = g.formats('csc')
     elif(args.data == "OGB"):
         print("Dataset: OGB")
         dataset = OGBDGLDataset(args)
         g = dataset[0]
-        g  = g.formats('csc')
+       # g  = g.formats('csc')
     else:
         g=None
         dataset=None
@@ -333,6 +346,14 @@ if __name__ == '__main__':
     # track_acc_GIDS(g, args, device, labels)
     num_gpus = int(torch.cuda.device_count())
     print("num GPUs: ", num_gpus)
+    print("Graph formats: ", g.formats())
+    # shared_graph = g.shared_memory("g") 
+    # print("Shared Graph: ", shared_graph)
+
+    print("Garph: ", g)
+    # shared_graph  = shared_graph.formats('csc')
+
     mp.spawn(track_acc_Multi_GIDS, args=(num_gpus, g, args, labels), nprocs=num_gpus)
+    #mp.spawn(track_acc_Multi_GIDS, args=(num_gpus, shared_graph, args, labels), nprocs=num_gpus)
 
 
