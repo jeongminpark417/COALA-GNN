@@ -684,6 +684,21 @@ class GIDS():
         pointer_list = [tensor.data_ptr() for tensor in tensor_list]
         return pointer_list
 
+    def create_ptr_list_2D(self, tensor_list):
+        pointer_list = []
+        for cur_tensor in tensor_list:
+            cur_list =  [tensor.data_ptr() for tensor in cur_tensor]
+            pointer_list.extend(cur_list)
+
+    def create_ptr_list_tensor_2D(self, tensor_list):
+        pointer_list = []
+        for cur_tensor in tensor_list:
+            cur_list =  [tensor.data_ptr() for tensor in cur_tensor]
+            pointer_list.extend(cur_list)
+        
+        pointer_tensor = torch.tensor(pointer_list, dtype=torch.int64, device=self.gids_device).contiguous()        
+        return pointer_tensor
+
 
     def split_index_tensor(self, index, my_bucket_list, split_len_list, meta_data_list):
         split_start = time.time()
@@ -809,6 +824,10 @@ class GIDS():
         if(self.wb_init == False):
             self.init_WB(dim, it, device)
 
+        # Updating Reuse Value
+        wb_index_list_tensor = self.create_ptr_list_tensor_2D(self.wb_gathered_index_list)
+        wb_size_list_tensor = self.create_ptr_list_tensor_2D(self.wb_gathered_index_size_list)
+        self.BAM_FS.update_reuse_counters(wb_index_list_tensor.data_ptr(), wb_size_list_tensor.data_ptr(), self.max_sample_size, self.world_size, self.wb_size)
         self.distribute_index(dim, it, device)
 
         batch = self.wb_batch_buffer.pop(0)

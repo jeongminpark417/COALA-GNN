@@ -217,7 +217,9 @@ struct SA_cache_d_t {
     uint64_t* next_reuse_;
 
     //need to be changed (RR : RoundRobin, EP_WINDOW: Window Buffering)
-    uint8_t evict_policy = EP_WINDOW;
+    //uint8_t evict_policy = EP_WINDOW;
+    uint8_t evict_policy = RR;
+
 
     bool use_WB;
     bool use_PVP;
@@ -250,7 +252,7 @@ struct SA_cache_d_t {
                  Controller** d_ctrls, uint32_t n_ctrls, uint64_t n_blocks_per_page, uint8_t* base_addr, uint64_t* prp1, uint64_t* prp2, bool prps,
                  simt::atomic<uint64_t, simt::thread_scope_device>* queue_head, simt::atomic<uint64_t, simt::thread_scope_device>* queue_tail, 
                  simt::atomic<uint64_t, simt::thread_scope_device>* queue_lock, simt::atomic<uint64_t, simt::thread_scope_device>* queue_extra_reads,
-                 bool WB_flag, bool PVP_flag, Victim_Buffer VB
+                uint64_t* next_reuse, bool WB_flag, bool PVP_flag, Victim_Buffer VB
                  ) :
         set_locks_(set_locks),
         way_locks_(way_locks),
@@ -271,13 +273,18 @@ struct SA_cache_d_t {
         q_lock(queue_lock),
         extra_reads(queue_extra_reads),
         use_WB(WB_flag),
-        use_PVP(PVP_flag)
+        use_PVP(PVP_flag),
+        next_reuse_(next_reuse)
         //victim_buffer(VB) 
         {
         double_read = 0;
         hit_cnt = 0;
         miss_cnt = 0;
         victim_buffer = VB;
+        if(WB_flag){
+            printf("eviction policy is EP_WINDOW\n");
+            evict_policy = EP_WINDOW;
+        }
     }
 
     __forceinline__
@@ -343,20 +350,63 @@ struct SA_cache_d_t {
     __forceinline__
     __device__
     uint32_t 
-    round_robin_evict(uint64_t set_id){
-        return (set_cnt_[set_id]++) % num_ways;
+    round_robin_evict(uint32_t lane, uint32_t leader, uint32_t mask, uint64_t set_id){
+        uint32_t way = 0;
+        if(lane == leader){
+            way = (set_cnt_[set_id]++) % num_ways;
+            
+        }
+        else{
+            way =  0;
+        }
+        way = __shfl_sync(mask, way, leader);
+        return way;
     }
 
     __forceinline__
     __device__
-    uint32_t evict(uint64_t set_id, uint8_t eviction_policy){
+    uint32_t 
+    reuse_based_evict(uint32_t lane, uint32_t leader, uint32_t mask,  uint64_t set_id){
+
+        unsigned next_reuse = 0xFFFF;
+        // No Memory Consistency is guaranteed here for now, but it should not affect accuracy
+        // NEED TO FIX
+        if(lane < num_ways){
+            uint64_t next_reuse_full = next_reuse_[set_id * num_ways + lane];
+            next_reuse = (unsigned) (next_reuse_full >> 48);
+            if(next_reuse < 128){
+               // printf("next reuse:%u\n", next_reuse);
+            }
+        }
+
+        unsigned next_reuse_min = __reduce_max_sync(mask, next_reuse);
+        // No reuse
+        if(next_reuse_min == 0xFFFF){
+          //  if(lane == leader) printf("No reuse\n");
+            return round_robin_evict(lane, leader, mask, set_id);
+        }
+
+        unsigned way = 0xFFFF;
+        if(next_reuse == next_reuse_min){
+            way = lane;
+        }
+        way = __reduce_min_sync(mask, way);
+        //if(lane == leader) printf("evicted way: %u next_reuse_min:%u\n", way, next_reuse_min);
+        return way;
+
+      //   return (set_cnt_[set_id]++) % num_ways;
+    }
+
+    __forceinline__
+    __device__
+    uint32_t evict(uint32_t lane, uint32_t leader, uint32_t mask, uint64_t set_id, uint8_t eviction_policy){
         uint32_t evict_way;
         switch(eviction_policy){
             case RR :
-                evict_way = round_robin_evict(set_id);
+                evict_way = round_robin_evict(lane, leader, mask, set_id);
                 return evict_way;
             case EP_WINDOW:
-                evict_way = round_robin_evict(set_id);
+                evict_way = reuse_based_evict(lane, leader, mask, set_id);
                 return evict_way;
             default:
                 return 0;
@@ -546,12 +596,11 @@ struct SA_cache_d_t {
 
         //EVICTION
         uint32_t way;
+        way = evict(lane, warp_leader, mask, set_id, evict_policy);
+       // way = __shfl_sync(mask, way, warp_leader);
         if(lane == warp_leader) {
-            way = evict(set_id, evict_policy);
             (cur_cl_seqlock + way) -> write_busy_lock();
         }
-        way = __shfl_sync(mask, way, warp_leader);
-
         //Check
        
         keys_[set_offset + way] = cl_id;
@@ -591,8 +640,12 @@ struct SA_cache_d_t {
 
         void* src = ((void*)base_addr_)+ (set_offset + way) * CL_SIZE;
         warp_memcpy<T>(src, output_ptr, CL_SIZE, mask);
-        if(lane == warp_leader) miss_cnt.fetch_add(1, simt::memory_order_relaxed);
-
+        if(lane == warp_leader) {
+            miss_cnt.fetch_add(1, simt::memory_order_relaxed);
+            // if(use_WB){
+            //     next_reuse_[set_offset + way] = 0xFFFFFFFFFFFFFFFF;
+            // }
+        }
         __syncwarp(mask);
 
         if(lane == warp_leader) {
@@ -619,6 +672,7 @@ struct SA_cache_d_t {
         for(uint32_t i = lane; i < num_ways; i += active_threads){
             if(key == cur_keys[i]){
                 uint64_t update_val = reuse_time;
+             //   printf("WRITE update val: %llu\n", (unsigned long long) update_val);
                 update_val = update_val << 48;
                 uint64_t gpu_b = GPU_id << 40;
                 update_val = (update_val | batch_idx | gpu_b);
@@ -722,8 +776,8 @@ struct GIDS_SA_handle{
 
 
         if(use_WB){
-            cudaMalloc((void**)&next_reuse_, sizeof(uint64_t) * num_sets_ * num_ways_);
-            cudaMemset(next_reuse_, 0xFF, sizeof(uint64_t) * num_sets_ * num_ways_);
+            cudaMalloc((void**)&next_reuse_, (uint64_t) sizeof(uint64_t) * num_sets_ * num_ways_);
+            cudaMemset(next_reuse_, 0xFF, (uint64_t) sizeof(uint64_t) * num_sets_ * num_ways_);
 
         }
 
@@ -854,7 +908,7 @@ struct GIDS_SA_handle{
 
         SA_cache_d_t<T> cache_host(d_set_locks, d_way_locks, num_sets_, num_ways_, CL_SIZE_, keys_, set_cnt_, d_ctrls, n_ctrls, n_blocks_per_page, base_addr, prp1, prp2, prps,
         cache_q_head, cache_q_tail, cache_q_lock, cache_extra_reads, 
-        use_WB, use_PVP, victim_buffer);
+        next_reuse_, use_WB, use_PVP, victim_buffer);
 
         cuda_err_chk(cudaMemcpy(cache_ptr, &cache_host, sizeof(SA_cache_d_t<T>), cudaMemcpyHostToDevice));
     }

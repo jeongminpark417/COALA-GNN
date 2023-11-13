@@ -150,7 +150,7 @@ def track_acc_Multi_GIDS(rank, world_size, g, args, label_array=None):
 
     model = DDP(model,  device_ids=[rank])
 
-    warm_up_iter = 200
+    warm_up_iter = 100
     # Setup is Done
     for epoch in tqdm.tqdm(range(args.epochs)):
         epoch_start = time.time()

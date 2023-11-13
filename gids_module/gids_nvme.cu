@@ -616,35 +616,35 @@ void BAM_Feature_Store<TYPE>::create_meta_buffer(uint64_t num_gpu, uint64_t max_
 
 
 // PVP
-
+// BUFFER FORMAT: [GPU0-WB0, GPU1-WB0, ... GPU8-WB0, GPU0-WB1]
 template <typename TYPE>
 void BAM_Feature_Store<TYPE>::update_reuse_counters(uint64_t batch_array_idx, uint64_t batch_size_idx, uint32_t max_batch_size,
  int num_gpus, int num_buffers) {
   
 
- cudaStream_t streams[num_gpus];
-  for (int i = 0; i < num_gpus; i++) {
-      cudaStreamCreate(&streams[i]);
-  }
-  
   cuda_err_chk(cudaDeviceSynchronize());
   auto t1 = Clock::now();
 
-  for (int i = 0; i < num_gpus; i++) {
 
-      uint64_t** batch_array_ptr = (uint64_t**) batch_array_idx;
-      uint64_t* batch_size_ptr = (uint64_t*) batch_size_idx;
+  uint64_t** batch_array_ptr = (uint64_t**) batch_array_idx;
+  uint64_t* batch_size_ptr = (uint64_t*) batch_size_idx;
 
 
-      uint64_t b_size = 32;
-      uint64_t n_warp = b_size / 32;
-      dim3 g_size = ((max_batch_size+n_warp - 1) / n_warp, num_buffers);
+  uint64_t b_size = 32;
+  uint64_t n_warp = b_size / 32;
+  uint32_t g_x = (max_batch_size + n_warp - 1)/n_warp;
+  uint32_t g_y = num_buffers * num_gpus;
+  dim3 g_size (g_x,g_y,1);
+  dim3 block_size (b_size, 1, 1);
 
-      update_reuse_counters_kernel<TYPE><<<g_size, b_size, 0, streams[i]>>>(cache_ptr,
-                                                  batch_array_ptr, batch_size_ptr, i);
-  }
 
+  update_reuse_counters_kernel<TYPE><<<g_size, block_size>>>(cache_ptr,
+                                              batch_array_ptr, batch_size_ptr, num_gpus);
+  
+
+  //Need to remove this barrier
   cuda_err_chk(cudaDeviceSynchronize());
+
   // auto t2 = Clock::now();
   // auto us = std::chrono::duration_cast<std::chrono::microseconds>(
   //     t2 - t1); // Microsecond (as int)
@@ -774,6 +774,7 @@ PYBIND11_MODULE(BAM_Feature_Store, m) {
       .def("reset_node_counter", &BAM_Feature_Store<float>::reset_node_counter)
       .def("create_meta_buffer", &BAM_Feature_Store<float>::create_meta_buffer)
       .def("gather_feature_list", &BAM_Feature_Store<float>::gather_feature_list)
+      .def("update_reuse_counters", &BAM_Feature_Store<float>::update_reuse_counters)
 
       .def("set_window_buffering", &BAM_Feature_Store<float>::set_window_buffering)
       .def("cpu_backing_buffer", &BAM_Feature_Store<float>::cpu_backing_buffer)
@@ -813,6 +814,9 @@ PYBIND11_MODULE(BAM_Feature_Store, m) {
       .def("reset_node_counter", &BAM_Feature_Store<int64_t>::reset_node_counter)
       .def("create_meta_buffer", &BAM_Feature_Store<int64_t>::create_meta_buffer)
       .def("gather_feature_list", &BAM_Feature_Store<int64_t>::gather_feature_list)
+      .def("update_reuse_counters", &BAM_Feature_Store<int64_t>::update_reuse_counters)
+
+
 
 
       .def("set_window_buffering", &BAM_Feature_Store<int64_t>::set_window_buffering)

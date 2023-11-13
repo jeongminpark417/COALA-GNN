@@ -77,9 +77,9 @@ target_compile_options(BAM_Feature_Store PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:
 			#  	--compiler-options='-fPIC $(python3 -m pybind11 --includes)'
                       >)
 
-target_compile_options(BAM_Feature_Store PRIVATE
-  "$<$<COMPILE_LANGUAGE:CUDA>:SHELL:-gencode arch=compute_70,code=sm_70>"
-)
+	      #target_compile_options(BAM_Feature_Store PRIVATE
+	      #  "$<$<COMPILE_LANGUAGE:CUDA>:SHELL:-gencode arch=compute_70,code=sm_70>"
+	      #)
 target_compile_options(BAM_Feature_Store PRIVATE
   "$<$<COMPILE_LANGUAGE:CUDA>:SHELL:-gencode arch=compute_80,code=sm_80>"
 )

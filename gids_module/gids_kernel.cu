@@ -236,18 +236,24 @@ print_meta_buffer_kernel( uint64_t** d_meta_buffer, uint64_t gpu_id, uint64_t me
 template <typename T = float>
 __global__ 
 void
-update_reuse_counters_kernel(SA_cache_d_t<T> *cache, uint64_t** batch_arrays, uint64_t* batch_size_array, uint32_t GPU_id){
+update_reuse_counters_kernel(SA_cache_d_t<T> *cache, uint64_t** batch_arrays, uint64_t* batch_size_array, uint32_t num_gpus){
   uint64_t bid = blockIdx.x;
   int num_warps = blockDim.x / 32;
   int warp_id = threadIdx.x / 32;
   int64_t read_idx = bid * num_warps + warp_id;
 
-  uint32_t reuse_time = blockIdx.y;
+  uint64_t y_bid = blockIdx.y;
+
+
+  uint32_t reuse_time = (blockIdx.y / num_gpus);
+  uint32_t GPU_id = blockIdx.y % num_gpus;
   const uint64_t num_idx = batch_size_array[reuse_time];
+
 
   if(read_idx < num_idx){
     uint64_t* index_ptr = batch_arrays[reuse_time];
     uint64_t node_id = index_ptr[read_idx];
+    //if(node_id == 0 && index_ptr == nullptr) printf("test\n");
     cache->update_reuse_val(node_id, reuse_time, GPU_id, read_idx);
   }
   
