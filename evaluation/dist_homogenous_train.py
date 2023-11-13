@@ -61,7 +61,7 @@ def track_acc_Multi_GIDS(rank, world_size, g, args, label_array=None):
         num_ele = args.num_ele,
         num_ssd = args.num_ssd,
         cache_size = args.cache_size,
-        window_buffer = args.window_buffer,
+        window_buffer = False,
         wb_size = args.wb_size,
         accumulator_flag = args.accumulator,
         cache_dim = args.cache_dim,
@@ -73,7 +73,8 @@ def track_acc_Multi_GIDS(rank, world_size, g, args, label_array=None):
         world_size = world_size,
         use_ddp=True,
         fan_out = [int(fanout) for fanout in args.fan_out.split(',')],
-        batch_size = args.batch_size
+        batch_size = args.batch_size,
+        use_WB = args.window_buffer
     
     )
     dim = args.emb_size
@@ -168,7 +169,7 @@ def track_acc_Multi_GIDS(rank, world_size, g, args, label_array=None):
         for step, (input_nodes, seeds, blocks, ret) in enumerate(train_dataloader):
             if(step % 10 == 0):
                 print("rank: ", rank, "step: ", step)
-            # if(step == 2):
+            # if(step == 30):
             #     break
             if(step == warm_up_iter):
                 print("warp up done")
@@ -226,26 +227,26 @@ def track_acc_Multi_GIDS(rank, world_size, g, args, label_array=None):
   
     # Evaluation
 
-    # model.eval()
-    # predictions = []
-    # labels = []
-    # with torch.no_grad():
-    #     for _, _, blocks in test_dataloader:
-    #         blocks = [block.to(device) for block in blocks]
-    #         inputs = blocks[0].srcdata['feat']
+    model.eval()
+    predictions = []
+    labels = []
+    with torch.no_grad():
+        for _, _, blocks in test_dataloader:
+            blocks = [block.to(device) for block in blocks]
+            inputs = blocks[0].srcdata['feat']
      
-    #         if(args.data == 'IGB'):
-    #             labels.append(blocks[-1].dstdata['label'].cpu().numpy())
-    #         elif(args.data == 'OGB'):
-    #             out_label = torch.index_select(label_array, 0, b[1]).flatten()
-    #             labels.append(out_label.numpy())
-    #         predict = model(blocks, inputs).argmax(1).cpu().numpy()
-    #         predictions.append(predict)
+            if(args.data == 'IGB'):
+                labels.append(blocks[-1].dstdata['label'].cpu().numpy())
+            elif(args.data == 'OGB'):
+                out_label = torch.index_select(label_array, 0, b[1]).flatten()
+                labels.append(out_label.numpy())
+            predict = model(blocks, inputs).argmax(1).cpu().numpy()
+            predictions.append(predict)
 
-    #     predictions = np.concatenate(predictions)
-    #     labels = np.concatenate(labels)
-    #     test_acc = sklearn.metrics.accuracy_score(labels, predictions)*100
-    # print("Test Acc {:.2f}%".format(test_acc))
+        predictions = np.concatenate(predictions)
+        labels = np.concatenate(labels)
+        test_acc = sklearn.metrics.accuracy_score(labels, predictions)*100
+    print("Test Acc {:.2f}%".format(test_acc))
 
 
 

@@ -110,7 +110,7 @@ struct BAM_Feature_Store {
   void init_controllers(GIDS_Controllers GIDS_ctrl, uint32_t ps, uint64_t r_off, uint64_t num_ele, uint64_t cache_size, 
                         uint64_t num_ssd);
   void init_set_associative_cache(GIDS_Controllers GIDS_ctrl, uint32_t ps, uint64_t r_off, uint64_t num_ele, uint64_t cache_size, 
-                        uint64_t num_ssd, uint64_t num_ways);
+                        uint64_t num_ssd, uint64_t num_ways, bool use_WB, bool use_PVP);
 
   void read_feature(uint64_t tensor_ptr, uint64_t index_ptr,int64_t num_index, int dim, int cache_dim, uint64_t key_off);
   void read_feature_hetero(int num_iter, const std::vector<uint64_t>&  i_ptr_list, const std::vector<uint64_t>& i_index_ptr_list, const std::vector<uint64_t>&   num_index, int dim, int cache_dim, const std::vector<uint64_t>& key_off);
@@ -139,14 +139,15 @@ struct BAM_Feature_Store {
   void flush_cpu_access_count();
 
   void split_node_list_init(uint64_t i_index_ptr, int64_t num_gpu, int64_t index_size, uint64_t i_index_pointer_list);
-  void split_node_list(uint64_t i_index_ptr, int64_t num_gpu, int64_t index_size, uint64_t i_bucket_ptr_list, uint64_t i_index_pointer_list);
+  void split_node_list(uint64_t i_index_ptr, int64_t num_gpu, int64_t index_size, uint64_t i_bucket_ptr_list, uint64_t i_index_pointer_list, uint64_t i_meta_buffer);
   void reset_node_counter(const std::vector<uint64_t>&  i_index_pointer_list, int num_gpu);
   void create_meta_buffer(uint64_t num_gpu, uint64_t max_size);
   void gather_feature_list(uint64_t i_return_ptr, const std::vector<uint64_t>&  i_return_ptr_list, const std::vector<uint64_t>&  index_size_list, 
-                                            int num_gpu, int dim, int my_rank);
+                                            int num_gpu, int dim, int my_rank, const std::vector<uint64_t>&  i_meta_buffer) ;
   
   void print_meta_buffer(const std::vector<uint64_t>&  index_size_list, int num_gpu , int rank);
 
+  void update_reuse_counters(uint64_t batch_array_idx, uint64_t batch_size_idx, uint32_t max_batch_size, int num_gpus, int num_buffers);
 };
 
 

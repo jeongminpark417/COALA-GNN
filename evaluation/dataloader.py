@@ -231,7 +231,7 @@ class SharedIGB260MDGLDataset(DGLDataset):
         g = self.graph
         self.graph = g.shared_memory("g") 
 
-      #  self.graph.ndata['feat'] = node_features
+        self.graph.ndata['feat'] = node_features
         self.graph.ndata['label'] = node_labels
         print("self graph2: ", self.graph.formats())
         if self.args.dataset_size != 'full':

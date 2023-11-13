@@ -100,7 +100,8 @@ void BAM_Feature_Store<TYPE>::init_controllers(GIDS_Controllers GIDS_ctrl, uint3
 }
 
 template <typename TYPE>
-void BAM_Feature_Store<TYPE>::init_set_associative_cache(GIDS_Controllers GIDS_ctrl, uint32_t ps, uint64_t read_off, uint64_t cache_size, uint64_t num_ele, uint64_t num_ssd, uint64_t num_ways) {
+void BAM_Feature_Store<TYPE>::init_set_associative_cache(GIDS_Controllers GIDS_ctrl, uint32_t ps, uint64_t read_off, uint64_t cache_size, uint64_t num_ele, uint64_t num_ssd, uint64_t num_ways,
+        bool use_WB, bool use_PVP) {
 
   numElems = num_ele;
   read_offset = read_off;
@@ -130,7 +131,7 @@ void BAM_Feature_Store<TYPE>::init_set_associative_cache(GIDS_Controllers GIDS_c
   uint64_t num_sets = n_pages / num_ways;
   std::cout << "n sets: " << (int)(this->numPages) <<std::endl;
   std::cout << "n ways: " << (int)(this->pageSize) << std::endl;
-  SA_handle = new GIDS_SA_handle<TYPE>(num_sets, num_ways, page_size, ctrls[0][0], ctrls, cudaDevice);
+  SA_handle = new GIDS_SA_handle<TYPE>(num_sets, num_ways, page_size, ctrls[0][0], ctrls, cudaDevice, use_WB, use_PVP);
 
   cache_ptr = SA_handle -> get_ptr();
 
@@ -515,7 +516,7 @@ const std::vector<uint64_t>&  index_size_list, int num_gpu, int dim, int cache_d
 
 template <typename TYPE>
 void BAM_Feature_Store<TYPE>::gather_feature_list(uint64_t i_return_ptr, const std::vector<uint64_t>&  i_return_ptr_list, const std::vector<uint64_t>&  index_size_list, 
-                                            int num_gpu, int dim, int my_rank){
+                                            int num_gpu, int dim, int my_rank, const std::vector<uint64_t>&  i_meta_buffer){
 
   TYPE* final_tensor_ptr = (TYPE *)i_return_ptr;
  cudaStream_t streams[num_gpu];
@@ -530,12 +531,14 @@ void BAM_Feature_Store<TYPE>::gather_feature_list(uint64_t i_return_ptr, const s
     TYPE* src_tensor_ptr = (TYPE *)(i_return_ptr_list[i]);
     uint64_t index_size = index_size_list[i];
 
+    uint64_t* d_meta_buffer_ptr =  (uint64_t* ) (i_meta_buffer[i]);
+
     uint64_t b_size = blkSize;
    // uint64_t n_warp = b_size / 32;
     //uint64_t g_size = (index_size+n_warp - 1) / n_warp;
     uint64_t g_size = index_size;
     gather_feature_kernel<TYPE><<<g_size, b_size, 0, streams[i]>>>(final_tensor_ptr, src_tensor_ptr,
-                                                d_meta_buffer, dim, index_size, i, my_rank);
+                                                d_meta_buffer_ptr, dim, index_size, i, my_rank);
 
   }
 
@@ -562,14 +565,17 @@ void BAM_Feature_Store<TYPE>::split_node_list_init(uint64_t i_index_ptr, int64_t
 
 template <typename TYPE>
 void BAM_Feature_Store<TYPE>::split_node_list(uint64_t i_index_ptr, int64_t num_gpu, 
-                                              int64_t index_size, uint64_t i_bucket_ptr_list, uint64_t i_index_pointer_list){
+                                              int64_t index_size, uint64_t i_bucket_ptr_list, uint64_t i_index_pointer_list,
+                                              uint64_t i_meta_buffer){
     int64_t* index_ptr = (int64_t *)i_index_ptr;
     uint64_t* index_pointer_list = (uint64_t *) i_index_pointer_list;
     uint64_t* bucket_ptr_list = (uint64_t *) i_bucket_ptr_list;
 
+    uint64_t* meta_buffer_list_ptr = (uint64_t*) i_meta_buffer;
+
     size_t g_size = (index_size + 1023)/1024;
 
-    split_node_list_kernel<TYPE><<<g_size,1024>>>(index_ptr, bucket_ptr_list, index_pointer_list, num_gpu, index_size, d_meta_buffer);
+    split_node_list_kernel<TYPE><<<g_size,1024>>>(index_ptr, bucket_ptr_list, index_pointer_list, num_gpu, index_size, meta_buffer_list_ptr);
     cuda_err_chk(cudaDeviceSynchronize());
 }
 
@@ -607,6 +613,52 @@ void BAM_Feature_Store<TYPE>::create_meta_buffer(uint64_t num_gpu, uint64_t max_
   cudaMemcpy(d_meta_buffer, meta_buffer, sizeof(uint64_t*) * num_gpu, cudaMemcpyHostToDevice);
 }
                                       
+
+
+// PVP
+
+template <typename TYPE>
+void BAM_Feature_Store<TYPE>::update_reuse_counters(uint64_t batch_array_idx, uint64_t batch_size_idx, uint32_t max_batch_size,
+ int num_gpus, int num_buffers) {
+  
+
+ cudaStream_t streams[num_gpus];
+  for (int i = 0; i < num_gpus; i++) {
+      cudaStreamCreate(&streams[i]);
+  }
+  
+  cuda_err_chk(cudaDeviceSynchronize());
+  auto t1 = Clock::now();
+
+  for (int i = 0; i < num_gpus; i++) {
+
+      uint64_t** batch_array_ptr = (uint64_t**) batch_array_idx;
+      uint64_t* batch_size_ptr = (uint64_t*) batch_size_idx;
+
+
+      uint64_t b_size = 32;
+      uint64_t n_warp = b_size / 32;
+      dim3 g_size = ((max_batch_size+n_warp - 1) / n_warp, num_buffers);
+
+      update_reuse_counters_kernel<TYPE><<<g_size, b_size, 0, streams[i]>>>(cache_ptr,
+                                                  batch_array_ptr, batch_size_ptr, i);
+  }
+
+  cuda_err_chk(cudaDeviceSynchronize());
+  // auto t2 = Clock::now();
+  // auto us = std::chrono::duration_cast<std::chrono::microseconds>(
+  //     t2 - t1); // Microsecond (as int)
+  // auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+  //     t2 - t1); // Microsecond (as int)
+  // const float ms_fractional =
+  //     static_cast<float>(us.count()) / 1000; // Milliseconds (as float)
+
+  // kernel_time += ms_fractional;
+  // total_access += num_index;
+
+  return;
+}
+
 
 
 
