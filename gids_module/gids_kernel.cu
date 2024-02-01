@@ -247,13 +247,15 @@ update_reuse_counters_kernel(SA_cache_d_t<T> *cache, uint64_t** batch_arrays, ui
 
   uint32_t reuse_time = (blockIdx.y / num_gpus);
   uint32_t GPU_id = blockIdx.y % num_gpus;
-  const uint64_t num_idx = batch_size_array[reuse_time];
+  const uint64_t num_idx = batch_size_array[y_bid];
 
+    
+  //if(bid == 0 && threadIdx.x == 0) printf("reuse time:%i num_idx:%llu\n", (int) reuse_time, (unsigned long long) num_idx);
 
   if(read_idx < num_idx){
-    uint64_t* index_ptr = batch_arrays[reuse_time];
+    uint64_t* index_ptr =(uint64_t*) (batch_arrays[y_bid]);
     uint64_t node_id = index_ptr[read_idx];
-    //if(node_id == 0 && index_ptr == nullptr) printf("test\n");
+    
     cache->update_reuse_val(node_id, reuse_time, GPU_id, read_idx);
   }
   

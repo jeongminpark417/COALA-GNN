@@ -212,7 +212,8 @@ class GIDS():
         batch_size = 1024,
         wb_size = 8, 
         use_WB = False,
-        use_PVP = False):
+        use_PVP = False,
+        pvp_depth = 128):
         #self.sample_type = "LADIES"
 
         if(long_type):
@@ -221,7 +222,7 @@ class GIDS():
             self.BAM_FS = BAM_Feature_Store.BAM_Feature_Store_float()
         
         self.use_PVP = use_PVP
-
+        self.pvp_depth = pvp_depth
         #DDP parameters
         self.rank = rank
         self.world_size = world_size
@@ -244,8 +245,8 @@ class GIDS():
 
         # Window Buffering MetaData for Prefetcing
         self.use_WB = use_WB
-        self.WB_init = False
         self.wb_size = wb_size
+        self.wb_init = False
 
         self.wb_batch_buffer = []
     
@@ -257,7 +258,6 @@ class GIDS():
         # Window Buffering MetaData
         self.window_buffering_flag = window_buffer
         self.window_buffer = []
-        self.wb_init = False
         #self.wb_size = wb_size
 
         # Cache Parameters
@@ -278,7 +278,7 @@ class GIDS():
         #self.gids_device="cuda:" + str(ctrl_idx)
         self.gids_device="cuda:" + str(device_id)
         
-        
+        self.device_id = device_id
         self.GIDS_controller = BAM_Feature_Store.GIDS_Controllers()
 
         if (ssd_list == None):
@@ -290,7 +290,7 @@ class GIDS():
         self.GIDS_controller.init_GIDS_controllers(self.num_ssd, 1024, 128, self.ssd_list, device_id)
 
         if(set_associative_cache):
-            self.BAM_FS.init_set_associative_cache(self.GIDS_controller, page_size, off, cache_size,num_ele, self.num_ssd, num_ways, self.use_WB, self.use_PVP)
+            self.BAM_FS.init_set_associative_cache(self.GIDS_controller, page_size, off, cache_size,num_ele, self.num_ssd, num_ways, self.use_WB, self.use_PVP, self.wb_size, self.pvp_depth)
         else:
             self.BAM_FS.init_controllers(self.GIDS_controller, page_size, off, cache_size,num_ele, self.num_ssd)
 
@@ -699,6 +699,18 @@ class GIDS():
         pointer_tensor = torch.tensor(pointer_list, dtype=torch.int64, device=self.gids_device).contiguous()        
         return pointer_tensor
 
+    def create_tensor_from_list_2D(self, tensor_list):
+        data_list = []
+        for cur_tensor in tensor_list:
+
+            for tensor in cur_tensor:
+                data_list.append(tensor.item())
+        
+        pointer_tensor = torch.tensor(data_list, dtype=torch.int64, device=self.gids_device).contiguous()        
+        return pointer_tensor
+
+    
+
 
     def split_index_tensor(self, index, my_bucket_list, split_len_list, meta_data_list):
         split_start = time.time()
@@ -725,6 +737,7 @@ class GIDS():
         self.Split_time += (time.time() - split_start)
 
 
+    # dist_list is updated
     def gather_tensors(self, dst_list, src_list):
         com_start = time.time()
         # Gather Tensors
@@ -778,6 +791,7 @@ class GIDS():
 
         sample_start = time.time()
         batch = next(it)
+
         index = batch[0].to(self.gids_device)
         index_size = len(index)   
         self.Sampling_time += time.time() - sample_start
@@ -801,20 +815,25 @@ class GIDS():
             dist.gather(self.index_len_tensor_list[i], cur_list, dst=i)
         
         self.Communication_time += (time.time() - gather_start)
+       # print("GPU ID: ", device," gather done")
 
         # Allocate Tensors
       
 
         self.communication_setup(dim, orig_index_size_list, gathered_index_list, gathered_index_size_list)
         self.gather_tensors(gathered_index_list, my_bucket_list)
-        
+      #  print("GPU ID: ", device," gather 2 done, orig index size list: ", orig_index_size_list)
+
         self.wb_batch_buffer.append(batch)
         self.wb_orig_index_size_list.append(orig_index_size_list)
         self.wb_gathered_index_size_list.append(gathered_index_size_list)
         self.wb_gathered_index_list.append(gathered_index_list)
         self.wb_meta_data_list.append(meta_data_list)
+
+        #print("GPU ID: ", device, " distribute_index done")
         
     def init_WB(self, dim, it, device):
+        print("WB size: ", self.wb_size)
         for i in range(self.wb_size):
             self.distribute_index(dim, it, device)
         self.wb_init = True
@@ -823,12 +842,22 @@ class GIDS():
         GIDS_time_start = time.time()
         if(self.wb_init == False):
             self.init_WB(dim, it, device)
+        # print("DIST WB init done")
+
+        # print("wb gathered index size list: ", self.wb_gathered_index_size_list)
+        #print("wb gathered index list: ", self.wb_gathered_index_list)
 
         # Updating Reuse Value
         wb_index_list_tensor = self.create_ptr_list_tensor_2D(self.wb_gathered_index_list)
-        wb_size_list_tensor = self.create_ptr_list_tensor_2D(self.wb_gathered_index_size_list)
+        wb_size_list_tensor = self.create_tensor_from_list_2D(self.wb_gathered_index_size_list)
+
+        #wb_size_list_tensor = (self.wb_gathered_index_size_list)
+        # if(self.device_id == 0):
+        #     print("wb gathered index list: ", self.wb_gathered_index_list)
+
         self.BAM_FS.update_reuse_counters(wb_index_list_tensor.data_ptr(), wb_size_list_tensor.data_ptr(), self.max_sample_size, self.world_size, self.wb_size)
         self.distribute_index(dim, it, device)
+
 
         batch = self.wb_batch_buffer.pop(0)
         orig_index_size_list = self.wb_orig_index_size_list.pop(0)
@@ -847,6 +876,15 @@ class GIDS():
         gathered_torch_ptr_list = self.create_ptr_list(gathered_tensor_list)
         self.BAM_FS.SA_read_feature_dist(gathered_torch_ptr_list, index_ptr_list, gathered_index_size_list, self.world_size, dim, self.cache_dim, 0)
         self.agg_time += time.time() - feature_read_start
+
+
+        # Debugging
+        print("Writing VB idx")
+        for i in range(self.wb_size):
+            print("GPU ID: ", self.gids_device, " WB idx: ", i)
+            self.BAM_FS.print_victim_buffer_data(i * self.pvp_depth ,4)
+
+
 
         # Gathering Minibatch Tensors
         self.gather_tensors(orig_tensor_list, gathered_tensor_list)

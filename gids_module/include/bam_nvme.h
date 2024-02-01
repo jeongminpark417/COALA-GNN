@@ -101,8 +101,10 @@ struct BAM_Feature_Store {
   std::vector<range_t<TYPE> *> vr;
   array_t<TYPE> *a;
   range_d_t<TYPE> *d_range;
-  //wb
 
+  //wb
+  uint32_t wb_size = 0;
+  uint32_t pvp_depth = 0;
   
   float kernel_time = 0; 
 
@@ -110,7 +112,7 @@ struct BAM_Feature_Store {
   void init_controllers(GIDS_Controllers GIDS_ctrl, uint32_t ps, uint64_t r_off, uint64_t num_ele, uint64_t cache_size, 
                         uint64_t num_ssd);
   void init_set_associative_cache(GIDS_Controllers GIDS_ctrl, uint32_t ps, uint64_t r_off, uint64_t num_ele, uint64_t cache_size, 
-                        uint64_t num_ssd, uint64_t num_ways, bool use_WB, bool use_PVP);
+                        uint64_t num_ssd, uint64_t num_ways, bool use_WB, bool use_PVP, uint32_t window_buffer_size, uint32_t pvp_depth_size);
 
   void read_feature(uint64_t tensor_ptr, uint64_t index_ptr,int64_t num_index, int dim, int cache_dim, uint64_t key_off);
   void read_feature_hetero(int num_iter, const std::vector<uint64_t>&  i_ptr_list, const std::vector<uint64_t>& i_index_ptr_list, const std::vector<uint64_t>&   num_index, int dim, int cache_dim, const std::vector<uint64_t>& key_off);
@@ -146,6 +148,9 @@ struct BAM_Feature_Store {
                                             int num_gpu, int dim, int my_rank, const std::vector<uint64_t>&  i_meta_buffer) ;
   
   void print_meta_buffer(const std::vector<uint64_t>&  index_size_list, int num_gpu , int rank);
+
+  void print_victim_buffer_index(uint64_t offset, uint64_t len);
+  void print_victim_buffer_data(uint64_t offset, uint64_t len);
 
   void update_reuse_counters(uint64_t batch_array_idx, uint64_t batch_size_idx, uint32_t max_batch_size, int num_gpus, int num_buffers);
 };

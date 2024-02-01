@@ -101,7 +101,7 @@ void BAM_Feature_Store<TYPE>::init_controllers(GIDS_Controllers GIDS_ctrl, uint3
 
 template <typename TYPE>
 void BAM_Feature_Store<TYPE>::init_set_associative_cache(GIDS_Controllers GIDS_ctrl, uint32_t ps, uint64_t read_off, uint64_t cache_size, uint64_t num_ele, uint64_t num_ssd, uint64_t num_ways,
-        bool use_WB, bool use_PVP) {
+        bool use_WB, bool use_PVP, uint32_t window_buffer_size, uint32_t pvp_depth_size) {
 
   numElems = num_ele;
   read_offset = read_off;
@@ -112,11 +112,12 @@ void BAM_Feature_Store<TYPE>::init_set_associative_cache(GIDS_Controllers GIDS_c
 
   ctrls = GIDS_ctrl.ctrls;
   cudaDevice = GIDS_ctrl.cudaDevice;
+  pvp_depth= pvp_depth_size;
 
   cudaSetDevice( cudaDevice );
 
   set_associative_cache = true;
-
+  wb_size = window_buffer_size;
 
   uint64_t page_size = pageSize;
   uint64_t n_pages = cache_size * 1024LL*1024/page_size;
@@ -131,7 +132,8 @@ void BAM_Feature_Store<TYPE>::init_set_associative_cache(GIDS_Controllers GIDS_c
   uint64_t num_sets = n_pages / num_ways;
   std::cout << "n sets: " << (int)(this->numPages) <<std::endl;
   std::cout << "n ways: " << (int)(this->pageSize) << std::endl;
-  SA_handle = new GIDS_SA_handle<TYPE>(num_sets, num_ways, page_size, ctrls[0][0], ctrls, cudaDevice, use_WB, use_PVP);
+  std::cout << "use PVP: " << use_PVP << std::endl;
+  SA_handle = new GIDS_SA_handle<TYPE>(num_sets, num_ways, page_size, ctrls[0][0], ctrls, cudaDevice, use_WB, use_PVP, cudaDevice, wb_size, pvp_depth_size);
 
   cache_ptr = SA_handle -> get_ptr();
 
@@ -621,7 +623,6 @@ template <typename TYPE>
 void BAM_Feature_Store<TYPE>::update_reuse_counters(uint64_t batch_array_idx, uint64_t batch_size_idx, uint32_t max_batch_size,
  int num_gpus, int num_buffers) {
   
-
   cuda_err_chk(cudaDeviceSynchronize());
   auto t1 = Clock::now();
 
@@ -751,6 +752,22 @@ BAM_Feature_Store<T> create_BAM_Feature_Store() {
     return BAM_Feature_Store<T>();
 }
 
+
+
+
+template <typename TYPE>
+void BAM_Feature_Store<TYPE>::print_victim_buffer_index(uint64_t offset, uint64_t len) {
+  SA_handle->print_victim_buffer_index(offset, len); 
+  return;
+}
+
+
+template <typename TYPE>
+void BAM_Feature_Store<TYPE>::print_victim_buffer_data(uint64_t offset, uint64_t len) {
+  SA_handle->print_victim_buffer_data(offset, len); 
+  return;
+}
+
 PYBIND11_MODULE(BAM_Feature_Store, m) {
   m.doc() = "Python bindings for an example library";
 
@@ -789,6 +806,9 @@ PYBIND11_MODULE(BAM_Feature_Store, m) {
       .def("set_offsets", &BAM_Feature_Store<float>::set_offsets)
       .def("get_cpu_access_count", &BAM_Feature_Store<float>::get_cpu_access_count)
       .def("flush_cpu_access_count", &BAM_Feature_Store<float>::flush_cpu_access_count)
+
+      .def("print_victim_buffer_index", &BAM_Feature_Store<float>::print_victim_buffer_index)
+      .def("print_victim_buffer_data", &BAM_Feature_Store<float>::print_victim_buffer_data)
 
       .def("print_stats", &BAM_Feature_Store<float>::print_stats)
       .def("print_meta_buffer", &BAM_Feature_Store<float>::print_meta_buffer);
@@ -833,6 +853,8 @@ PYBIND11_MODULE(BAM_Feature_Store, m) {
       .def("get_cpu_access_count", &BAM_Feature_Store<int64_t>::get_cpu_access_count)
       .def("flush_cpu_access_count", &BAM_Feature_Store<int64_t>::flush_cpu_access_count)
 
+      .def("print_victim_buffer_index", &BAM_Feature_Store<int64_t>::print_victim_buffer_index)
+      .def("print_victim_buffer_data", &BAM_Feature_Store<int64_t>::print_victim_buffer_data)
 
       .def("print_stats", &BAM_Feature_Store<int64_t>::print_stats)
       .def("print_meta_buffer", &BAM_Feature_Store<int64_t>::print_meta_buffer);

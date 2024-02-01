@@ -74,7 +74,9 @@ def track_acc_Multi_GIDS(rank, world_size, g, args, label_array=None):
         use_ddp=True,
         fan_out = [int(fanout) for fanout in args.fan_out.split(',')],
         batch_size = args.batch_size,
-        use_WB = args.window_buffer
+        use_WB = args.window_buffer,
+        use_PVP = True,
+        pvp_depth = 128
     
     )
     dim = args.emb_size
@@ -169,8 +171,8 @@ def track_acc_Multi_GIDS(rank, world_size, g, args, label_array=None):
         for step, (input_nodes, seeds, blocks, ret) in enumerate(train_dataloader):
             if(step % 10 == 0):
                 print("rank: ", rank, "step: ", step)
-            # if(step == 30):
-            #     break
+            if(step == 2):
+                break
             if(step == warm_up_iter):
                 print("warp up done")
                 train_dataloader.print_stats()
@@ -231,7 +233,10 @@ def track_acc_Multi_GIDS(rank, world_size, g, args, label_array=None):
     predictions = []
     labels = []
     with torch.no_grad():
+        count = 0
         for _, _, blocks in test_dataloader:
+            if(count == 10):
+                break
             blocks = [block.to(device) for block in blocks]
             inputs = blocks[0].srcdata['feat']
      
@@ -243,6 +248,7 @@ def track_acc_Multi_GIDS(rank, world_size, g, args, label_array=None):
             predict = model(blocks, inputs).argmax(1).cpu().numpy()
             predictions.append(predict)
 
+            count += 1
         predictions = np.concatenate(predictions)
         labels = np.concatenate(labels)
         test_acc = sklearn.metrics.accuracy_score(labels, predictions)*100
