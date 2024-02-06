@@ -4,7 +4,7 @@ import sklearn.metrics
 import torch, torch.nn as nn, torch.optim as optim
 import time, tqdm, numpy as np
 from models import *
-from dataloader import IGB260MDGLDataset, OGBDGLDataset, SharedIGB260MDGLDataset
+from GIDS_dataloader import IGB260MDGLDataset, OGBDGLDataset, SharedIGB260MDGLDataset
 import csv 
 import warnings
 
@@ -51,6 +51,8 @@ def track_acc_Multi_GIDS(rank, world_size, g, args, label_array=None):
     print("Rank: ", rank, " GNN trainign starts")
 
     init_process_group(world_size, rank)
+    print("Rank: ", rank, " Init Process done")
+
     device = torch.device('cuda:{:d}'.format(rank))
     torch.cuda.set_device(device)
 
@@ -76,7 +78,8 @@ def track_acc_Multi_GIDS(rank, world_size, g, args, label_array=None):
         batch_size = args.batch_size,
         use_WB = args.window_buffer,
         use_PVP = True,
-        pvp_depth = 128
+        pvp_depth = 128,
+        debug_mode = False
     
     )
     dim = args.emb_size
@@ -98,7 +101,7 @@ def track_acc_Multi_GIDS(rank, world_size, g, args, label_array=None):
                )
 
     # g.ndata['features'] = g.ndata['feat']
-    g.ndata['labels'] = g.ndata['label']
+    #g.ndata['labels'] = g.ndata['label']
 
     train_nid = torch.nonzero(g.ndata['train_mask'], as_tuple=True)[0]
     val_nid = torch.nonzero(g.ndata['val_mask'], as_tuple=True)[0]
@@ -119,20 +122,37 @@ def track_acc_Multi_GIDS(rank, world_size, g, args, label_array=None):
         drop_last=False,
         num_workers=args.num_workers,
         use_alternate_streams=False,
-        use_ddp=True
+        use_ddp=True,
+        device=device
         )
 
-    val_dataloader = dgl.dataloading.DataLoader(
-        g, val_nid, sampler,
-        batch_size=args.batch_size,
-        shuffle=False, drop_last=False,
-        num_workers=args.num_workers)
+    # val_dataloader = dgl.dataloading.DataLoader(
+    #     g, val_nid, sampler,
+    #     batch_size=args.batch_size,
+    #     shuffle=False, drop_last=False,
+    #     num_workers=args.num_workers)
 
-    test_dataloader = dgl.dataloading.DataLoader(
-        g, test_nid, sampler,
-        batch_size=args.batch_size,
-        shuffle=True, drop_last=False,
-        num_workers=args.num_workers)
+    # test_dataloader = dgl.dataloading.DataLoader(
+    #     g, test_nid, sampler,
+    #     batch_size=args.batch_size,
+    #     shuffle=True, drop_last=False,
+    #     num_workers=args.num_workers)
+
+    test_dataloader = GIDS_DGLDataLoader(
+        g,
+        test_nid,
+        sampler,
+        args.batch_size,
+        dim,
+        GIDS_Loader,
+        shuffle=True,
+        drop_last=False,
+        num_workers=args.num_workers,
+        use_alternate_streams=False,
+        use_ddp=True,
+        device=device
+        )
+
 
     if args.model_type == 'gcn':
         model = GCN(in_feats, args.hidden_channels, args.num_classes, 
@@ -171,8 +191,8 @@ def track_acc_Multi_GIDS(rank, world_size, g, args, label_array=None):
         for step, (input_nodes, seeds, blocks, ret) in enumerate(train_dataloader):
             if(step % 10 == 0):
                 print("rank: ", rank, "step: ", step)
-            if(step == 2):
-                break
+            # if(step == 5):
+            #     break
             if(step == warm_up_iter):
                 print("warp up done")
                 train_dataloader.print_stats()
@@ -189,7 +209,7 @@ def track_acc_Multi_GIDS(rank, world_size, g, args, label_array=None):
             batch_inputs = ret
             transfer_start = time.time() 
 
-            batch_labels = blocks[-1].dstdata['labels']
+            batch_labels = blocks[-1].dstdata['label']
             
 
             blocks = [block.int().to(device) for block in blocks]
@@ -218,8 +238,8 @@ def track_acc_Multi_GIDS(rank, world_size, g, args, label_array=None):
                 train_time = 0
                 e2e_time = 0
                 
-                #Just testing 100 iterations remove the next line if you do not want to halt
-                return None
+               # Just testing 100 iterations remove the next line if you do not want to halt
+                break
         
         epoch_time = time.time() - epoch_time_start
         print("epoch time: ", epoch_time)
@@ -234,11 +254,12 @@ def track_acc_Multi_GIDS(rank, world_size, g, args, label_array=None):
     labels = []
     with torch.no_grad():
         count = 0
-        for _, _, blocks in test_dataloader:
-            if(count == 10):
+        for _, _, blocks,ret in test_dataloader:
+            if(count == 4):
                 break
             blocks = [block.to(device) for block in blocks]
-            inputs = blocks[0].srcdata['feat']
+            #inputs = blocks[0].srcdata['feat']
+            inputs = ret
      
             if(args.data == 'IGB'):
                 labels.append(blocks[-1].dstdata['label'].cpu().numpy())
@@ -273,7 +294,8 @@ if __name__ == '__main__':
         choices=[0, 1], help='0:nlp-node embeddings, 1:random')
     parser.add_argument('--data', type=str, default='IGB')
     parser.add_argument('--emb_size', type=int, default=1024)
-    
+    parser.add_argument('--shared', type=int, default=1, 
+        choices=[0, 1], help='0:copy graph=r, 1:shared memory')
     # Model
     parser.add_argument('--model_type', type=str, default='gcn',
                         choices=['gat', 'sage', 'gcn'])
@@ -338,14 +360,14 @@ if __name__ == '__main__':
     device = f'cuda:' + str(args.device) if torch.cuda.is_available() else 'cpu'
     if(args.data == 'IGB'):
         print("Dataset: IGB")
-        dataset = SharedIGB260MDGLDataset(args)
+        dataset = IGB260MDGLDataset(args)
         g = dataset[0]
-       # g  = g.formats('csc')
+        #g  = g.formats('csc')
     elif(args.data == "OGB"):
         print("Dataset: OGB")
         dataset = OGBDGLDataset(args)
         g = dataset[0]
-       # g  = g.formats('csc')
+        #g  = g.formats('csc')
     else:
         g=None
         dataset=None
@@ -354,13 +376,13 @@ if __name__ == '__main__':
     num_gpus = int(torch.cuda.device_count())
     print("num GPUs: ", num_gpus)
     print("Graph formats: ", g.formats())
-    # shared_graph = g.shared_memory("g") 
+    print("Garph: ", g)
+
+    shared_graph = g
+    # shared_graph  = shared_graph.formats('csc')
     # print("Shared Graph: ", shared_graph)
 
-    print("Garph: ", g)
-    # shared_graph  = shared_graph.formats('csc')
-
-    mp.spawn(track_acc_Multi_GIDS, args=(num_gpus, g, args, labels), nprocs=num_gpus)
-    #mp.spawn(track_acc_Multi_GIDS, args=(num_gpus, shared_graph, args, labels), nprocs=num_gpus)
+    #mp.spawn(track_acc_Multi_GIDS, args=(num_gpus, g, args, labels), nprocs=num_gpus)
+    mp.spawn(track_acc_Multi_GIDS, args=(num_gpus, shared_graph, args, labels), nprocs=num_gpus)
 
 

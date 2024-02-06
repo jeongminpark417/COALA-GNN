@@ -137,9 +137,10 @@ class seqlock {
 
 class Victim_Buffer {
 
+    public:
     uint32_t num_buffers;
     uint32_t buffer_depth;
-    uint32_t* queue_counters;
+    uint64_t* queue_counters;
 
     //Pinned in CPU Memory
     // 2D Array (Number of buffers, depth of buffer)
@@ -157,7 +158,7 @@ class Victim_Buffer {
         data_arrays = nullptr;
     }
     __device__ __host__
-    Victim_Buffer(uint32_t n_buffer, uint32_t b_depth, uint32_t* q_counters, uint64_t* i_array, uint64_t* d_array) :
+    Victim_Buffer(uint32_t n_buffer, uint32_t b_depth, uint64_t* q_counters, uint64_t* i_array, uint64_t* d_array) :
         num_buffers(n_buffer),
         buffer_depth(b_depth),
         queue_counters(q_counters),
@@ -166,9 +167,8 @@ class Victim_Buffer {
     {}
 
     __device__ __host__
-    __host__
     void
-    init(uint32_t n_buffer, uint32_t b_depth, uint32_t* q_counters, uint64_t* i_array, uint64_t* d_array) {
+    init(uint32_t n_buffer, uint32_t b_depth, uint64_t* q_counters, uint64_t* i_array, uint64_t* d_array) {
         num_buffers = n_buffer;
         buffer_depth = b_depth;
         queue_counters = q_counters;
@@ -181,11 +181,13 @@ class Victim_Buffer {
     void
     evict_to_pvp(uint64_t evicted_batch_index, uint64_t* cl_src_ptr, uint64_t cl_size, uint64_t reuse_val, uint32_t head_ptr, unsigned tid){
         uint32_t q_id = (reuse_val + head_ptr) % num_buffers;
-        unsigned int buffer_idx  = 0;
+        uint64_t buffer_idx  = 0;
         if(tid == 0){
-            buffer_idx = atomicAdd(queue_counters + q_id, 1);
-            if(buffer_idx < buffer_depth)
+            buffer_idx = atomicAdd((unsigned long long*)queue_counters + q_id, (unsigned long long)1);
+            if(buffer_idx < buffer_depth){
+                printf("buffer_depth:%llu\n", buffer_depth);
                 index_arrays[buffer_idx + buffer_depth * q_id] = evicted_batch_index;
+            }
         }
         buffer_idx = __shfl_sync(FULL_MASK, buffer_idx, 0);
 
@@ -198,16 +200,44 @@ class Victim_Buffer {
             warp_memcpy<uint64_t>(cl_src_ptr, (void*)(data_arrays + queue_offset), cl_size, FULL_MASK );
         }
     }
+  
 
+    __host__
+    void prefetch_from_victim_queue(uint64_t* PVP_pinned_data, uint64_t* PVP_pinned_idx, uint64_t cl_size, uint64_t num_evicted_cl, uint32_t head_ptr, cudaStream_t stream){
     
 
+        uint64_t* wb_queue_head = data_arrays + cl_size / sizeof(uint64_t) * buffer_depth * head_ptr;
+        uint64_t* wb_id_array_head = index_arrays + buffer_depth * head_ptr;
+
+        cudaMemcpy(PVP_pinned_data, wb_queue_head, num_evicted_cl * cl_size, cudaMemcpyHostToDevice);	
+        cudaMemcpy(PVP_pinned_idx, wb_id_array_head, num_evicted_cl * sizeof(uint64_t), cudaMemcpyHostToDevice);	
+       // cudaMemcpyAsync(PVP_pinned_data, wb_queue_head, num_evicted_cl* cl_size, cudaMemcpyHostToDevice, stream);	
+       // cudaMemcpyAsync(PVP_pinned_idx, wb_id_array_head, tnum_evicted_cl * sizeof(uint64_t), cudaMemcpyHostToDevice, stream);	
+    }
 };
 
 
 template<typename T>
 struct SA_cache_d_t {
 
-    Victim_Buffer victim_buffer;
+    //Victim_Buffer victim_buffer;
+
+    //public:
+    uint32_t num_buffers;
+    uint32_t buffer_depth;
+    uint64_t* queue_counters;
+
+    // uint64_t* index_arrays;
+    // // 2D Array (Number of buffers, depth of buffer * CL)
+    // uint64_t* data_arrays;
+
+
+
+    //Pinned in CPU Memory
+    // 2D Array (Number of buffers, depth of buffer)
+    uint64_t* index_arrays_;
+    // 2D Array (Number of buffers, depth of buffer * CL)
+    uint64_t* data_arrays_;
 
     seqlock* set_locks_;
     seqlock* way_locks_;
@@ -262,7 +292,9 @@ struct SA_cache_d_t {
                  Controller** d_ctrls, uint32_t n_ctrls, uint64_t n_blocks_per_page, uint8_t* base_addr, uint64_t* prp1, uint64_t* prp2, bool prps,
                  simt::atomic<uint64_t, simt::thread_scope_device>* queue_head, simt::atomic<uint64_t, simt::thread_scope_device>* queue_tail, 
                  simt::atomic<uint64_t, simt::thread_scope_device>* queue_lock, simt::atomic<uint64_t, simt::thread_scope_device>* queue_extra_reads,
-                uint64_t* next_reuse, bool WB_flag, bool PVP_flag, Victim_Buffer VB,
+                uint64_t* next_reuse, bool WB_flag, bool PVP_flag,
+                // Victim_Buffer VB,
+                uint32_t n_buffers, uint32_t b_depth, uint64_t* q_counters,   uint64_t* index_arrays, uint64_t* data_arrays,
                 unsigned int my_GPU_id
                  ) :
         set_locks_(set_locks),
@@ -286,13 +318,21 @@ struct SA_cache_d_t {
         use_WB(WB_flag),
         use_PVP(PVP_flag),
         next_reuse_(next_reuse),
+        //
+        buffer_depth(b_depth),
+        num_buffers(n_buffers),
+        queue_counters(q_counters),
+        index_arrays_(index_arrays),
+        data_arrays_(data_arrays),
         my_GPU_id_(my_GPU_id)
         //victim_buffer(VB) 
+
         {
         double_read = 0;
         hit_cnt = 0;
         miss_cnt = 0;
-        victim_buffer = VB;
+      //  victim_buffer = VB;
+
         if(WB_flag){
             printf("eviction policy is EP_WINDOW\n");
             evict_policy = EP_WINDOW;
@@ -312,6 +352,45 @@ struct SA_cache_d_t {
         miss_cnt = 0;
         double_read = 0;
     }
+
+
+    __device__
+        void
+        evict_to_pvp(uint64_t evicted_batch_index, uint64_t* cl_src_ptr, uint64_t cl_size, uint64_t reuse_val, uint32_t head_ptr, unsigned tid){
+            uint32_t q_id = (reuse_val + head_ptr) % num_buffers;
+            uint64_t buffer_idx  = 0;
+            if(tid == 0){
+                buffer_idx = atomicAdd((unsigned long long*)queue_counters + q_id, (unsigned long long)1);
+                if(buffer_idx < buffer_depth){
+                 //   printf("buffer_depth2 :%llu\n", (unsigned long long)buffer_depth);
+                    index_arrays_[buffer_idx + buffer_depth * q_id] = evicted_batch_index;
+                }
+            }
+            buffer_idx = __shfl_sync(FULL_MASK, buffer_idx, 0);
+
+            if(buffer_idx < buffer_depth){
+                uint64_t ele_per_CL = cl_size / sizeof(uint64_t);
+                uint64_t ele_per_buffer = ele_per_CL * buffer_depth;
+
+                uint64_t queue_offset =  q_id * ele_per_buffer + buffer_idx * ele_per_CL;
+
+                warp_memcpy<uint64_t>(cl_src_ptr, (void*)(data_arrays_ + queue_offset), cl_size, FULL_MASK );
+            }
+        }
+    
+
+        __host__
+        void prefetch_from_victim_queue_(uint64_t* PVP_pinned_data, uint64_t* PVP_pinned_idx, uint64_t cl_size, uint64_t num_evicted_cl, uint32_t head_ptr, cudaStream_t stream){
+        
+
+            uint64_t* wb_queue_head = data_arrays_ + cl_size / sizeof(uint64_t) * buffer_depth * head_ptr;
+            uint64_t* wb_id_array_head = index_arrays_ + buffer_depth * head_ptr;
+
+            cudaMemcpy(PVP_pinned_data, wb_queue_head, num_evicted_cl * cl_size, cudaMemcpyHostToDevice);	
+            cudaMemcpy(PVP_pinned_idx, wb_id_array_head, num_evicted_cl * sizeof(uint64_t), cudaMemcpyHostToDevice);	
+        // cudaMemcpyAsync(PVP_pinned_data, wb_queue_head, num_evicted_cl* cl_size, cudaMemcpyHostToDevice, stream);	
+        // cudaMemcpyAsync(PVP_pinned_idx, wb_id_array_head, tnum_evicted_cl * sizeof(uint64_t), cudaMemcpyHostToDevice, stream);	
+        }
 
 
     __forceinline__
@@ -524,7 +603,7 @@ struct SA_cache_d_t {
     __forceinline__
     __device__
     void 
-    get_data(uint64_t cl_id, T* output_ptr, uint32_t head_ptr = 0){
+    get_data(uint64_t cl_id, T* output_ptr, uint32_t head_ptr, int64_t num_idx = 0){
 
         uint32_t lane = lane_id();
         uint32_t mask = __activemask();
@@ -614,7 +693,7 @@ struct SA_cache_d_t {
             (cur_cl_seqlock + way) -> write_busy_lock();
         }
         //Check
-       
+        uint64_t old_key =  keys_[set_offset + way];
         keys_[set_offset + way] = cl_id;
 
         if(lane == warp_leader) {
@@ -632,11 +711,17 @@ struct SA_cache_d_t {
 
             //GPUID + Batch Index
             uint64_t evicted_batch_id = (reuse_line & (0x0000FFFFFFFFFFFF));
+            uint64_t evicted_batch_id_test = (reuse_line & (0x000000FFFFFFFFFF));
+
             uint64_t reuse_val = reuse_line >> 48;
-            //uint64_t GPU_id = (reuse_line >> 48) & (0x00FF);
+            uint64_t GPU_id = (reuse_line >> 40) & (0x00FF);
+
             if(reuse_val != FF_16){
-                victim_buffer.evict_to_pvp(evicted_batch_id, (uint64_t*) cl_src, CL_SIZE, reuse_val, head_ptr, lane);
-                if(threadIdx.x % 32 == 0) printf("evict to pvp GPU id:%u reuse_val:%llu\n", (unsigned) my_GPU_id_, reuse_val);
+                //if(evicted_batch_id_test >=8000 )printf("wrong evict: %llu GPU: %llu\n", evicted_batch_id_test, GPU_id);
+                evict_to_pvp(evicted_batch_id, (uint64_t*) cl_src, CL_SIZE, reuse_val, head_ptr, lane);
+                //victim_buffer.evict_to_pvp(evicted_batch_id, (uint64_t*) cl_src, CL_SIZE, reuse_val, head_ptr, lane);
+
+                //if(threadIdx.x % 32 == 0) printf("GPU: %llu evict to pvp KEY:%llu batch_id:%llu my GPU id:%u reuse_val:%llu GPU_id:%llu num_idx:%llu \n",(unsigned long long) GPU_id, (unsigned long long)old_key, (unsigned long long)evicted_batch_id_test, (unsigned) my_GPU_id_, (unsigned long long)reuse_val,(unsigned long long) GPU_id, (unsigned long long)num_idx);
             }
         }
 
@@ -674,7 +759,7 @@ struct SA_cache_d_t {
     // Only supported when Metadata for PVP is enabled
     __device__
     void
-    update_reuse_val(uint64_t key, uint32_t reuse_time, uint8_t GPU_id, uint64_t batch_idx){
+    update_reuse_val(uint64_t key, uint32_t reuse_time, uint32_t GPU_id, uint64_t batch_idx, uint64_t num_idx=0){
         uint64_t set_id = get_set_id(key);
         uint64_t set_offset = set_id * num_ways;
         uint64_t* cur_keys = keys_ + set_offset;
@@ -687,16 +772,28 @@ struct SA_cache_d_t {
         for(uint32_t i = lane; i < num_ways; i += active_threads){
             if(key == cur_keys[i]){
                 uint64_t update_val = reuse_time;
-                printf("WRITE GPU_id:%u key: %llu update val: %llu\n",(unsigned) my_GPU_id_, (unsigned long long) key, (unsigned long long) update_val);
+                //printf("WRITE GPU_id:%u key: %llu update val: %llu num_idx:%llu\n",(unsigned) GPU_id, (unsigned long long) key, (unsigned long long) update_val, (unsigned long long) num_idx);
+
                 update_val = update_val << 48;
-                uint64_t gpu_b = GPU_id << 40;
+                uint64_t gpu_b = (uint64_t)GPU_id << 40;
+
                 update_val = (update_val | batch_idx | gpu_b);
-                atomicMin((unsigned long long int*) (cur_next_reuse + i), (unsigned long long int) update_val);
+
+               // atomicMin((unsigned long long int*) (cur_next_reuse + i), (unsigned long long int) update_val);
+                atomicMin((unsigned long long int*) (cur_next_reuse + i), (unsigned long long int) 0);
+
 
             }
         }
         return;
     }
+
+    __device__
+    void
+    print_vals(){
+        printf("Queue depth:%llu\n", (unsigned long long) (buffer_depth));
+    }
+
 
   
     
@@ -749,9 +846,14 @@ struct GIDS_SA_handle{
     bool use_WB;
     bool use_PVP;
 
-    Victim_Buffer victim_buffer;
+    //Victim_Buffer victim_buffer;
+        //public:
+    // uint32_t num_buffers;
+    // uint32_t buffer_depth;
+  //  uint64_t* queue_counters;
 
-    uint32_t*  queue_counters;
+
+    uint64_t*  queue_counters;
 
     uint64_t* host_index_array;
     uint64_t* host_data_array;
@@ -759,10 +861,15 @@ struct GIDS_SA_handle{
     uint64_t* device_index_array;
     uint64_t* device_data_array;
 
-    uint32_t num_buffers;
-    uint32_t buffer_depth;
+    const uint32_t num_buffers;
+    const uint32_t buffer_depth;
 
     unsigned int my_GPU_id_;
+
+    __host__
+    void flush_next_reuse(){
+        cudaMemset(next_reuse_, 0xFF, (uint64_t) sizeof(uint64_t) * num_sets_ * num_ways_);
+    }
 
     __host__ 
     GIDS_SA_handle(uint64_t num_sets, uint64_t num_ways, uint64_t cl_size, const Controller& ctrl, const std::vector<Controller*>& ctrls,  const uint32_t cudaDevice,
@@ -801,7 +908,8 @@ struct GIDS_SA_handle{
 
         if(use_PVP){      
             printf("initializing PVP buffer num_buffer:%lu buffer_depth:%lu\n", num_buffers, buffer_depth);
-            cudaMalloc(&queue_counters, sizeof(uint32_t) * num_buffers);
+            cudaMalloc(&queue_counters, sizeof(uint64_t) * num_buffers);
+            cudaMemset(queue_counters, 0, sizeof(uint64_t) * num_buffers);
 
 
             cudaHostAlloc((uint64_t **)&host_index_array, sizeof(uint64_t) * num_buffers * buffer_depth , cudaHostAllocMapped);
@@ -810,7 +918,7 @@ struct GIDS_SA_handle{
             cudaHostAlloc((uint64_t **)&host_data_array, CL_SIZE_ * num_buffers * buffer_depth, cudaHostAllocMapped);
             cudaHostGetDevicePointer((uint64_t **)&device_data_array, (uint64_t *)host_data_array, 0);
 
-            victim_buffer.init(num_buffers, buffer_depth, queue_counters, device_index_array, device_data_array);
+           // victim_buffer.init(num_buffers, buffer_depth, queue_counters, device_index_array, device_data_array);
         }
 
         uint64_t cache_size = CL_SIZE_ * num_sets_ * num_ways_;
@@ -871,7 +979,12 @@ struct GIDS_SA_handle{
 
         SA_cache_d_t<T> cache_host(d_set_locks, d_way_locks, num_sets_, num_ways_, CL_SIZE_, keys_, set_cnt_, d_ctrls, n_ctrls, n_blocks_per_page, base_addr, prp1, prp2, prps,
         cache_q_head, cache_q_tail, cache_q_lock, cache_extra_reads, 
-        next_reuse_, use_WB, use_PVP, victim_buffer, my_GPU_id_);
+        next_reuse_, use_WB, use_PVP, 
+        //victim_buffer,           
+        num_buffers,  buffer_depth,  queue_counters, device_index_array,  device_data_array,
+        my_GPU_id_);
+
+        //std::cout << "Cache host: " << cache_host.victim_buffer.buffer_depth;
 
         cuda_err_chk(cudaMemcpy(cache_ptr, &cache_host, sizeof(SA_cache_d_t<T>), cudaMemcpyHostToDevice));
     }
@@ -903,6 +1016,35 @@ struct GIDS_SA_handle{
         std::cout << std::endl;
     }
 
+     __host__
+        void prefetch_from_victim_queue_(uint64_t* PVP_pinned_data, uint64_t* PVP_pinned_idx, uint64_t cl_size, uint64_t num_evicted_cl, uint32_t head_ptr, cudaStream_t stream){
+        
+
+            uint64_t* wb_queue_head = host_data_array + cl_size / sizeof(uint64_t) * buffer_depth * head_ptr;
+            uint64_t* wb_id_array_head = host_index_array + buffer_depth * head_ptr;
+
+            cudaMemcpy(PVP_pinned_data, wb_queue_head, num_evicted_cl * cl_size, cudaMemcpyHostToDevice);	
+            cudaMemcpy(PVP_pinned_idx, wb_id_array_head, num_evicted_cl * sizeof(uint64_t), cudaMemcpyHostToDevice);	
+        // cudaMemcpyAsync(PVP_pinned_data, wb_queue_head, num_evicted_cl* cl_size, cudaMemcpyHostToDevice, stream);	
+        // cudaMemcpyAsync(PVP_pinned_idx, wb_id_array_head, tnum_evicted_cl * sizeof(uint64_t), cudaMemcpyHostToDevice, stream);	
+        }
+
+    __host__
+    uint64_t prefetch_from_victim_queue(T* PVP_pinned_data, uint64_t* PVP_pinned_idx, uint32_t head_ptr, cudaStream_t stream){
+    
+     //prefetch_from_victim_queue(T* PVP_pinned_data, uint64_t* PVP_pinned_idx, 
+     //uint64_t cl_size, uint64_t num_evicted_cl, uint32_t head_ptr, cudaStream_t stream){
+        uint64_t num_evicted_cl = 0;
+        cudaMemcpy(&num_evicted_cl, queue_counters + head_ptr, sizeof(uint64_t), cudaMemcpyDeviceToHost);
+        if(num_evicted_cl > buffer_depth) 
+            num_evicted_cl = buffer_depth;
+        cudaMemset(queue_counters+head_ptr, 0, sizeof(uint64_t));
+        prefetch_from_victim_queue_((uint64_t*)PVP_pinned_data, PVP_pinned_idx, CL_SIZE_, num_evicted_cl, head_ptr, stream);
+
+   
+
+        return num_evicted_cl;
+    }
 
 };
 

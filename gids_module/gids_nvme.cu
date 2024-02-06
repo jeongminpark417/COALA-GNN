@@ -82,8 +82,8 @@ void BAM_Feature_Store<TYPE>::init_controllers(GIDS_Controllers GIDS_ctrl, uint3
   this -> h_range = new range_t<TYPE>((uint64_t)0, (uint64_t)numElems, (uint64_t)read_off,
                               (uint64_t)(t_size / page_size), (uint64_t)0,
                               (uint64_t)page_size, h_pc, cudaDevice, 
-			      REPLICATE
-			      //STRIPE
+			      //REPLICATE
+			      STRIPE
 			      );
 
   
@@ -100,12 +100,18 @@ void BAM_Feature_Store<TYPE>::init_controllers(GIDS_Controllers GIDS_ctrl, uint3
 }
 
 template <typename TYPE>
-void BAM_Feature_Store<TYPE>::init_set_associative_cache(GIDS_Controllers GIDS_ctrl, uint32_t ps, uint64_t read_off, uint64_t cache_size, uint64_t num_ele, uint64_t num_ssd, uint64_t num_ways,
-        bool use_WB, bool use_PVP, uint32_t window_buffer_size, uint32_t pvp_depth_size) {
+void BAM_Feature_Store<TYPE>::init_set_associative_cache(GIDS_Controllers GIDS_ctrl, uint32_t ps, uint64_t read_off, uint64_t cache_size, uint32_t num_gpus, uint64_t num_ele, uint64_t num_ssd, uint64_t num_ways,
+        bool use_WB, bool use_PVP, uint32_t window_buffer_size, uint32_t pvp_depth_size, uint64_t max_sample_size, int debug) {
 
   numElems = num_ele;
   read_offset = read_off;
   n_ctrls = num_ssd;
+  n_gpus = num_gpus;
+  if(debug == 1)
+    debug_mode = true;
+  else
+    debug_mode = false;
+
   this -> pageSize = ps;
   this -> dim = ps / sizeof(TYPE);
   this -> total_access = 0; 
@@ -113,6 +119,8 @@ void BAM_Feature_Store<TYPE>::init_set_associative_cache(GIDS_Controllers GIDS_c
   ctrls = GIDS_ctrl.ctrls;
   cudaDevice = GIDS_ctrl.cudaDevice;
   pvp_depth= pvp_depth_size;
+  this -> use_PVP = use_PVP;
+  this -> max_sample_size = max_sample_size;
 
   cudaSetDevice( cudaDevice );
 
@@ -127,21 +135,51 @@ void BAM_Feature_Store<TYPE>::init_set_associative_cache(GIDS_Controllers GIDS_c
   std::cout << "page size: " << (int)(this->pageSize) << std::endl;
   std::cout << "num elements: " << this->numElems << std::endl;
 
+  if(debug_mode){
+    printf("DEBUG MODE\n");
+  }
+  else{
+    printf("NOT DEBUG MODE\n");
+  }
+
   //uint64_t num_ways = 4;
 
   uint64_t num_sets = n_pages / num_ways;
-  std::cout << "n sets: " << (int)(this->numPages) <<std::endl;
-  std::cout << "n ways: " << (int)(this->pageSize) << std::endl;
+  std::cout << "n sets: " << num_sets <<std::endl;
+  std::cout << "n ways: " << num_ways << std::endl;
   std::cout << "use PVP: " << use_PVP << std::endl;
   SA_handle = new GIDS_SA_handle<TYPE>(num_sets, num_ways, page_size, ctrls[0][0], ctrls, cudaDevice, use_WB, use_PVP, cudaDevice, wb_size, pvp_depth_size);
 
   cache_ptr = SA_handle -> get_ptr();
 
+  if(use_PVP){
+    cudaMalloc(&PVP_pinned_data, page_size * pvp_depth_size);
+    cudaMalloc(&PVP_pinned_idx, sizeof(uint64_t) * pvp_depth_size);
+    node_flag_buffer_array = new uint64_t*[n_gpus];
+    for(int i  = 0; i < n_gpus; i++){
+      cudaMalloc(&(node_flag_buffer_array[i]), sizeof(uint64_t) * max_sample_size);
+      cudaMemset(node_flag_buffer_array[i], 0, sizeof(uint64_t) * max_sample_size);
+    }
+    cudaMalloc(&node_flag_buffer, sizeof(uint64_t*) * n_gpus);
+    cudaMemcpy(node_flag_buffer, node_flag_buffer_array,  sizeof(uint64_t*) * n_gpus, cudaMemcpyHostToDevice);
+  }
+
+
   cudaMalloc(&d_cpu_access, sizeof(unsigned int));
   cudaMemset(d_cpu_access, 0 , sizeof(unsigned));
  
+  if(debug_mode){
+    cudaMalloc(&evict_counter, sizeof(unsigned long long));
+    cudaMalloc(&prefetch_counter, sizeof(unsigned long long));
+    cudaMemset(evict_counter, 0, sizeof(unsigned long long));
+    cudaMemset(prefetch_counter, 0, sizeof(unsigned long long));
+  }
+
   return;
 }
+
+
+
 
 
 template <typename TYPE>
@@ -162,6 +200,8 @@ void BAM_Feature_Store<TYPE>::print_stats_no_ctrl(){
   std::cout << "print array reset: ";
   this->a->print_reset_stats();
   std::cout << std::endl;
+
+  
 }
 
 
@@ -179,7 +219,7 @@ void BAM_Feature_Store<TYPE>::print_stats(){
 
   }
   else{
-    print_kernel<TYPE><<<1,1>>>(cache_ptr);
+    print_kernel<TYPE><<<1,1>>>(cache_ptr, debug_mode, evict_counter, prefetch_counter);
 	  cuda_err_chk(cudaDeviceSynchronize())
   }
 
@@ -445,7 +485,7 @@ void BAM_Feature_Store<TYPE>::SA_read_feature(uint64_t i_ptr, uint64_t i_index_p
   auto t1 = Clock::now();
 
   SA_read_feature_kernel<TYPE><<<g_size, b_size>>>(cache_ptr, tensor_ptr,
-                                                  index_ptr, dim, num_index, cache_dim, key_off);
+                                                  index_ptr, dim, num_index, cache_dim, key_off, head_ptr);
   // if(cpu_buffer_flag == false){
   //   read_feature_kernel<TYPE><<<g_size, b_size>>>(a->d_array_ptr, tensor_ptr,
   //                                                 index_ptr, dim, num_index, cache_dim, key_off);
@@ -495,12 +535,21 @@ const std::vector<uint64_t>&  index_size_list, int num_gpu, int dim, int cache_d
       uint64_t n_warp = b_size / 32;
       uint64_t g_size = (index_size+n_warp - 1) / n_warp;
 
-      SA_read_feature_kernel<TYPE><<<g_size, b_size, 0, streams[i]>>>(cache_ptr, tensor_ptr,
-                                                index_ptr, dim, index_size, cache_dim, key_off);
+      if(use_PVP){
+      //  printf("PVP read feature\n");
+        SA_read_feature_kernel_with_PVP<TYPE><<<g_size, b_size, 0, streams[i]>>>(cache_ptr, tensor_ptr,
+                                                index_ptr, node_flag_buffer, PVP_pinned_data, dim, index_size, cache_dim, i, key_off, head_ptr, debug_mode, prefetch_counter);
+      }                
+      else{
+        SA_read_feature_kernel<TYPE><<<g_size, b_size, 0, streams[i]>>>(cache_ptr, tensor_ptr,
+                                                index_ptr, dim, index_size, cache_dim, key_off, head_ptr);
+      } 
+
       total_access += index_size;
   }
 
   cuda_err_chk(cudaDeviceSynchronize());
+
   auto t2 = Clock::now();
   auto us = std::chrono::duration_cast<std::chrono::microseconds>(
       t2 - t1); // Microsecond (as int)
@@ -510,6 +559,13 @@ const std::vector<uint64_t>&  index_size_list, int num_gpu, int dim, int cache_d
       static_cast<float>(us.count()) / 1000; // Milliseconds (as float)
 
   kernel_time += ms_fractional;
+
+  if(use_PVP){
+    for(int i  = 0; i < n_gpus; i++){
+          cudaMemset(node_flag_buffer_array[i], 0, sizeof(uint64_t) * max_sample_size);
+        }
+  }
+
 
   return;
 }
@@ -622,8 +678,13 @@ void BAM_Feature_Store<TYPE>::create_meta_buffer(uint64_t num_gpu, uint64_t max_
 template <typename TYPE>
 void BAM_Feature_Store<TYPE>::update_reuse_counters(uint64_t batch_array_idx, uint64_t batch_size_idx, uint32_t max_batch_size,
  int num_gpus, int num_buffers) {
-  
+
+  //printf("GPU ID:%llu update reuse counter start\n", SA_handle -> my_GPU_id_);
   cuda_err_chk(cudaDeviceSynchronize());
+  SA_handle -> flush_next_reuse();
+  cuda_err_chk(cudaDeviceSynchronize());
+  //printf("GPU ID:%llu Flush done \n", SA_handle -> my_GPU_id_);
+
   auto t1 = Clock::now();
 
 
@@ -638,6 +699,7 @@ void BAM_Feature_Store<TYPE>::update_reuse_counters(uint64_t batch_array_idx, ui
   dim3 g_size (g_x,g_y,1);
   dim3 block_size (b_size, 1, 1);
 
+  //printf("update reuse counters num_gpus:%i g_u:%lu\n", num_gpus, (unsigned long) g_y);
 
   update_reuse_counters_kernel<TYPE><<<g_size, block_size>>>(cache_ptr,
                                               batch_array_ptr, batch_size_ptr, num_gpus);
@@ -646,20 +708,50 @@ void BAM_Feature_Store<TYPE>::update_reuse_counters(uint64_t batch_array_idx, ui
   //Need to remove this barrier
   cuda_err_chk(cudaDeviceSynchronize());
 
-  // auto t2 = Clock::now();
-  // auto us = std::chrono::duration_cast<std::chrono::microseconds>(
-  //     t2 - t1); // Microsecond (as int)
-  // auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-  //     t2 - t1); // Microsecond (as int)
-  // const float ms_fractional =
-  //     static_cast<float>(us.count()) / 1000; // Milliseconds (as float)
+  //printf("GPU ID:%llu Update Reuse done \n", SA_handle -> my_GPU_id_);
 
-  // kernel_time += ms_fractional;
-  // total_access += num_index;
 
   return;
 }
 
+
+template <typename TYPE>
+void BAM_Feature_Store<TYPE>::prefetch_from_victim_queue(){
+  //cudaStreamCreateWithPriority (&transfer_stream,cudaStreamNonBlocking, low_priority);
+  num_evicted_cl =  SA_handle -> prefetch_from_victim_queue(PVP_pinned_data, PVP_pinned_idx, head_ptr, transfer_stream);
+
+  unsigned int GPU = SA_handle ->  my_GPU_id_;
+
+ // printf("GPU: %llu num evicted cl:%llu\n", (unsigned long long) GPU, num_evicted_cl);
+  head_ptr = (head_ptr + 1) % wb_size;
+}
+
+template <typename TYPE>
+void BAM_Feature_Store<TYPE>::fill_batch(){
+
+  //cudaStreamCreateWithFlags(&fill_stream, cudaStreamNonBlocking);
+	if(first){
+    first = false;
+		return;
+	}
+  // uint64_t** d_node_flag_ptr = (uint64_t**) i_node_flag_ptr;
+  uint32_t b_size = 128;
+  uint32_t g_size = (num_evicted_cl + b_size - 1)/b_size; 
+  cuda_err_chk(cudaDeviceSynchronize());
+  
+
+  //fill_batch_kernel<TYPE><<<g_size, b_size, 0, fill_stream>>>(PVP_pinned_idx, d_node_flag_ptr, num_evicted_cl, dim);
+  //fill_batch_kernel<TYPE><<<g_size, b_size, 0, fill_stream >>>(PVP_pinned_idx, node_flag_buffer, num_evicted_cl, dim);
+
+  fill_batch_kernel<TYPE><<<g_size, b_size>>>(PVP_pinned_idx, node_flag_buffer, num_evicted_cl, dim, debug_mode, evict_counter, SA_handle->my_GPU_id_, max_sample_size);
+
+  cuda_err_chk(cudaDeviceSynchronize());
+
+
+  //cudaStreamDestroy(transfer_stream);
+
+  return;
+}
 
 
 
@@ -807,11 +899,17 @@ PYBIND11_MODULE(BAM_Feature_Store, m) {
       .def("get_cpu_access_count", &BAM_Feature_Store<float>::get_cpu_access_count)
       .def("flush_cpu_access_count", &BAM_Feature_Store<float>::flush_cpu_access_count)
 
+      .def("fill_batch", &BAM_Feature_Store<float>::fill_batch)
+
+      .def("prefetch_from_victim_queue", &BAM_Feature_Store<float>::prefetch_from_victim_queue)
+
+
       .def("print_victim_buffer_index", &BAM_Feature_Store<float>::print_victim_buffer_index)
       .def("print_victim_buffer_data", &BAM_Feature_Store<float>::print_victim_buffer_data)
 
       .def("print_stats", &BAM_Feature_Store<float>::print_stats)
       .def("print_meta_buffer", &BAM_Feature_Store<float>::print_meta_buffer);
+
 
 
 
@@ -852,6 +950,9 @@ PYBIND11_MODULE(BAM_Feature_Store, m) {
       .def("set_offsets", &BAM_Feature_Store<int64_t>::set_offsets)
       .def("get_cpu_access_count", &BAM_Feature_Store<int64_t>::get_cpu_access_count)
       .def("flush_cpu_access_count", &BAM_Feature_Store<int64_t>::flush_cpu_access_count)
+
+      .def("prefetch_from_victim_queue", &BAM_Feature_Store<int64_t>::prefetch_from_victim_queue)
+      .def("fill_batch", &BAM_Feature_Store<int64_t>::fill_batch)
 
       .def("print_victim_buffer_index", &BAM_Feature_Store<int64_t>::print_victim_buffer_index)
       .def("print_victim_buffer_data", &BAM_Feature_Store<int64_t>::print_victim_buffer_data)

@@ -29,7 +29,7 @@ __global__ void read_feature_kernel(array_d_t<T> *dr, T *out_tensor_ptr,
 template <typename T = float>
 __global__ void SA_read_feature_kernel(SA_cache_d_t<T> *cache, T *out_tensor_ptr,
                                     int64_t *index_ptr, int dim,
-                                    int64_t num_idx, int cache_dim, uint64_t key_off) {
+                                    int64_t num_idx, int cache_dim, uint64_t key_off, uint32_t head_ptr) {
 
   uint64_t bid = blockIdx.x;
   int num_warps = blockDim.x / 32;
@@ -39,10 +39,48 @@ __global__ void SA_read_feature_kernel(SA_cache_d_t<T> *cache, T *out_tensor_ptr
     uint64_t row_index = index_ptr[idx_idx] + key_off;
     uint64_t tid = threadIdx.x % 32;
 
-    cache->get_data(row_index, out_tensor_ptr + (bid * num_warps + warp_id) * dim);
+    cache->get_data(row_index, out_tensor_ptr + (bid * num_warps + warp_id) * dim, head_ptr);
+  } 
+}
+
+template <typename T = float>
+__global__ void SA_read_feature_kernel_with_PVP(SA_cache_d_t<T> *cache, T *out_tensor_ptr,
+                                    int64_t *index_ptr, uint64_t** node_flag_ptr, T* PVP_pinned_data,  int dim,
+                                    int64_t num_idx, int cache_dim, int cur_gpu, uint64_t key_off, uint32_t head_ptr, bool debug_mode, unsigned long long* debug_count = nullptr) {
+
+  uint64_t bid = blockIdx.x;
+  int num_warps = blockDim.x / 32;
+  int warp_id = threadIdx.x / 32;
+  uint64_t idx_idx = bid * num_warps + warp_id;
+  //if(idx_idx == 0 && threadIdx.x == 0) printf("GPU ID:%llu num_idx size: %llu\n", (unsigned long long) (cache -> my_GPU_id_), (unsigned long long) num_idx);
+
+  if (idx_idx < num_idx) {
+    uint64_t row_index = index_ptr[idx_idx] + key_off;
+    uint64_t tid = threadIdx.x % 32;
+
+
+    uint64_t fetch_idx = node_flag_ptr[cur_gpu][idx_idx] ;
+
+    //already prefetched
+   if((fetch_idx >> 63) == (uint64_t) 1){
+      //if(tid == 0) printf("prefetched KEY:%llu my GPU ID:%llu write GPU:%i IDX:%llu num_idx:%llu \n", row_index, (unsigned long long) (cache -> my_GPU_id_), cur_gpu,  (unsigned long long) idx_idx,(unsigned long long) num_idx);
+      if(debug_mode) {
+        if(tid == 0) atomicAdd(debug_count, 1);
+
+      }
+      for(; tid < dim; tid += 32){
+        uint64_t prefetched_idx = fetch_idx & (0x7FFFFFFFFFFFFFFF);
+        out_tensor_ptr[(bid * num_warps + warp_id) * dim + tid] = PVP_pinned_data[dim * fetch_idx + tid];
+      }
+    }
+
+    else{
+      cache->get_data(row_index, out_tensor_ptr + (bid * num_warps + warp_id) * dim, head_ptr, num_idx);
+    }
   }
   
 }
+
 
 
 template <typename T = float>
@@ -158,7 +196,7 @@ split_node_list_init_kernel(int64_t* index_ptr, uint64_t* index_pointer_list,  i
     int64_t cur_node = index_ptr[idx];
     int64_t gpu_id = cur_node % num_gpu;
     uint64_t counter_add = (index_pointer_list[gpu_id]);
-    atomicAdd((unsigned long long int*) (index_pointer_list[gpu_id]), (unsigned long long int)1);
+    atomicAdd((unsigned int*) (index_pointer_list[gpu_id]), (unsigned int )1);
   }
 }
 
@@ -240,7 +278,7 @@ update_reuse_counters_kernel(SA_cache_d_t<T> *cache, uint64_t** batch_arrays, ui
   uint64_t bid = blockIdx.x;
   int num_warps = blockDim.x / 32;
   int warp_id = threadIdx.x / 32;
-  int64_t read_idx = bid * num_warps + warp_id;
+  uint64_t read_idx = bid * num_warps + warp_id;
 
   uint64_t y_bid = blockIdx.y;
 
@@ -249,14 +287,15 @@ update_reuse_counters_kernel(SA_cache_d_t<T> *cache, uint64_t** batch_arrays, ui
   uint32_t GPU_id = blockIdx.y % num_gpus;
   const uint64_t num_idx = batch_size_array[y_bid];
 
-    
+ // if(bid == 0 && threadIdx.x ==0 && GPU_id != 0) printf("GPU id diff:%lu num_idx: %llu\n", (unsigned long)GPU_id, num_idx);
   //if(bid == 0 && threadIdx.x == 0) printf("reuse time:%i num_idx:%llu\n", (int) reuse_time, (unsigned long long) num_idx);
 
   if(read_idx < num_idx){
     uint64_t* index_ptr =(uint64_t*) (batch_arrays[y_bid]);
     uint64_t node_id = index_ptr[read_idx];
+    //if(GPU_id != 0) printf("\t \t GPU_id correct\n");
     
-    cache->update_reuse_val(node_id, reuse_time, GPU_id, read_idx);
+    cache->update_reuse_val(node_id, reuse_time, GPU_id, read_idx,num_idx);
   }
   
 }
@@ -266,7 +305,48 @@ update_reuse_counters_kernel(SA_cache_d_t<T> *cache, uint64_t** batch_arrays, ui
 
 template <typename T = float>
 __global__ 
+void fill_batch_kernel(uint64_t* PVP_pinned_idx, uint64_t** node_flag_ptr, uint32_t batch_size, int dim, bool debug_mode, unsigned  long long* debug_counter, unsigned int my_GPU, uint64_t max_sample_size) {
+
+
+  uint64_t id = blockIdx.x * blockDim.x + threadIdx.x;
+//  if(id == 0) printf("GPU: %llu batch size; %llu sizeof data:%llu\n",(unsigned long long)my_GPU, (unsigned long long) batch_size,  (unsigned long long)(sizeof(unsigned long long)));
+
+  if (id < batch_size){
+    uint64_t cur_idx =  PVP_pinned_idx[id];
+    uint16_t cur_GPU_ID = (cur_idx >> 40) & 0x00FF;
+    uint64_t batch_idx = (cur_idx & (0x000000FFFFFFFFFF));
+    //printf("node ID Write id: %llu idx:%llu my GPU ID: %llu write GPU_id: %llu\n", id, batch_idx, (unsigned long long) my_GPU, (unsigned long long) cur_GPU_ID);
+    uint64_t flag = id | 0x8000000000000000;
+
+    if(batch_idx >=  max_sample_size || cur_GPU_ID > 1){
+      printf("out of index GPU:%llu index: %llu GPU id: %llu id:%llu\n", (unsigned long long)my_GPU, (unsigned long long) batch_idx, (unsigned long long) cur_GPU_ID, (unsigned long long) id);
+    }
+      //printf("FILL GPU:%llu  index: %llu GPU id: %llu\n",(unsigned long long)my_GPU, (unsigned long long) batch_idx, (unsigned long long) cur_GPU_ID);
+
+    node_flag_ptr[cur_GPU_ID][batch_idx] = (id | 0x8000000000000000);
+
+    if(id == 0 && debug_mode) {
+      atomicAdd(debug_counter, batch_size);
+      //printf("batch_size: %llu\n", (unsigned long long) batch_size);
+    }
+    
+  }
+
+  else{
+
+  }
+
+}
+
+
+template <typename T = float>
+__global__ 
 void
-print_kernel(SA_cache_d_t<T> *cache){
+print_kernel(SA_cache_d_t<T> *cache, bool debug_mode, unsigned long long*  evict_counter, unsigned long long* prefetch_counter){
   cache -> print_stats();
+  if(threadIdx.x == 0 && debug_mode) {
+    printf("evict count: %llu\n", evict_counter[0]);
+    printf("prefetch count: %llu\n", prefetch_counter[0]);
+
+  }
 }

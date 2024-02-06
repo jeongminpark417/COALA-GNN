@@ -87,6 +87,7 @@ struct BAM_Feature_Store {
   uint32_t bus = 0;
   uint32_t devfn = 0;
 
+  uint32_t n_gpus = 1;
   uint32_t n_ctrls = 1;
   size_t blkSize = 128;
   size_t queueDepth = 1024;
@@ -105,14 +106,38 @@ struct BAM_Feature_Store {
   //wb
   uint32_t wb_size = 0;
   uint32_t pvp_depth = 0;
-  
+
+  //PVP
+  bool use_PVP = false;
+  TYPE* PVP_pinned_data;
+  uint64_t* PVP_pinned_idx;
+  int32_t head_ptr = 0 ;
+  uint64_t num_evicted_cl = 0;
+
+  uint64_t** node_flag_buffer;
+  uint64_t** node_flag_buffer_array ;
+  uint64_t max_sample_size;
+
+  //Debugging 
+  bool debug_mode = false;
+  unsigned long long * evict_counter;
+  unsigned long long* prefetch_counter;
+
+
+  cudaStream_t transfer_stream;
+  cudaStream_t fill_stream;
+
   float kernel_time = 0; 
+  bool first = true;
+
 
 
   void init_controllers(GIDS_Controllers GIDS_ctrl, uint32_t ps, uint64_t r_off, uint64_t num_ele, uint64_t cache_size, 
                         uint64_t num_ssd);
-  void init_set_associative_cache(GIDS_Controllers GIDS_ctrl, uint32_t ps, uint64_t r_off, uint64_t num_ele, uint64_t cache_size, 
-                        uint64_t num_ssd, uint64_t num_ways, bool use_WB, bool use_PVP, uint32_t window_buffer_size, uint32_t pvp_depth_size);
+  void init_set_associative_cache(GIDS_Controllers GIDS_ctrl, uint32_t ps, uint64_t r_off, uint64_t cache_size, uint32_t num_gpus,  uint64_t num_ele, 
+                        uint64_t num_ssd, uint64_t num_ways, bool use_WB, bool use_PVP, uint32_t window_buffer_size, uint32_t pvp_depth_size, uint64_t max_samples, int debug);
+
+  
 
   void read_feature(uint64_t tensor_ptr, uint64_t index_ptr,int64_t num_index, int dim, int cache_dim, uint64_t key_off);
   void read_feature_hetero(int num_iter, const std::vector<uint64_t>&  i_ptr_list, const std::vector<uint64_t>& i_index_ptr_list, const std::vector<uint64_t>&   num_index, int dim, int cache_dim, const std::vector<uint64_t>& key_off);
@@ -148,6 +173,10 @@ struct BAM_Feature_Store {
                                             int num_gpu, int dim, int my_rank, const std::vector<uint64_t>&  i_meta_buffer) ;
   
   void print_meta_buffer(const std::vector<uint64_t>&  index_size_list, int num_gpu , int rank);
+
+  //PVP
+  void prefetch_from_victim_queue();
+  void fill_batch();
 
   void print_victim_buffer_index(uint64_t offset, uint64_t len);
   void print_victim_buffer_data(uint64_t offset, uint64_t len);
