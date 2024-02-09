@@ -39,17 +39,15 @@ class CollateWrapper(object):
         self.sample_func = sample_func
         self.g = g
         self.device = device
+        self.pin_memory = True
+
 
     def __call__(self, items):
-#        print("Collate called\n")
         graph_device = getattr(self.g, 'device', None)   
-        #items = recursive_apply(items, lambda x: x.to(self.device))
- #       print("Collate item: ", items)
-
-        batch = self.sample_func(self.g, items)
-  #      print("Collate batch: ", items)
+        items = recursive_apply(items, lambda x: x.to(self.device))
+        with nvtx.annotate("Sample", color="green"):
+            batch = self.sample_func(self.g, items)
         return batch
-        #return recursive_apply(batch, remove_parent_storage_columns, self.g)
 
 
 class _PrefetchingIter(object):
@@ -66,6 +64,7 @@ class _PrefetchingIter(object):
         cur_it = self.dataloader_it
       #  print("iterator: ",cur_it)
       #  batch = self.GIDS_Loader.distributed_fetch_feature(self.dataloader.dim, cur_it, self.GIDS_Loader.gids_device)
+        #batch = self.GIDS_Loader.fetch_feature(self.dataloader.dim, cur_it, self.GIDS_Loader.gids_device)
 
         if (self.dataloader.use_ddp):
             batch = self.GIDS_Loader.distributed_fetch_feature(self.dataloader.dim, cur_it, self.GIDS_Loader.gids_device)
@@ -114,6 +113,7 @@ class GIDS_DGLDataLoader(torch.utils.data.DataLoader):
         self.indices = indices     
         num_workers = kwargs.get('num_workers', 0)
 
+
         indices_device = None
         try:
             if isinstance(indices, Mapping):
@@ -136,6 +136,15 @@ class GIDS_DGLDataLoader(torch.utils.data.DataLoader):
         if device is None:     
             device = torch.cuda.current_device()
         self.device = _get_device(device)
+        
+        #pin graph
+        if not self.graph._graph.is_pinned():
+            print("\t\tPinning graph")
+            self.graph._graph.pin_memory_()
+            
+        else:
+            print('\t\tNot pinning Graph')
+
 
         # Sanity check - we only check for DGLGraphs.
         if isinstance(self.graph, DGLHeteroGraph):            
@@ -680,8 +689,8 @@ class GIDS():
 
             self.GIDS_time += time.time() - GIDS_time_start
 
-            batch.append(return_torch)
-
+            #batch.append(return_torch)
+            batch = (*batch, return_torch)
             return batch
 
     #Fetching Data from the SSDs
@@ -777,11 +786,8 @@ class GIDS():
     # dist_list is updated
     def gather_tensors(self, dst_list, src_list):
         com_start = time.time()
-        # Gather Tensors
-       # print("\t\t gather RANK: ", self.rank, " world size: ", self.world_size)
         for i in range(self.world_size):
             #Sender
-#            print("\t\t\ RANK: ", self.rank, "i: ", i)
             if(self.rank == i):
                 for j in range(self.world_size):
                    # print("\t\t\ RANK: ", self.rank, "j: ", j)
@@ -801,8 +807,6 @@ class GIDS():
         self.Communication_time += (time.time() - com_start)
         return
 
-
-
     def communication_setup(self, dim, orig_index_size_list, gathered_index_list, gathered_index_size_list):
         setup_start = time.time()
         for i in range(self.world_size):
@@ -821,6 +825,7 @@ class GIDS():
             orig_index_size_list.append(recv_len) 
         self.Communication_setup_time += (time.time() - setup_start)
 
+    @nvtx.annotate("Alloc Tensor", color="red")
     def alloc_tensors(self, dim, orig_index_size_list, orig_tensor_list, gathered_index_size_list, gathered_tensor_list):
         for i in range(self.world_size):
             orig_tensor_len = orig_index_size_list[i]
@@ -852,10 +857,10 @@ class GIDS():
         #torch.cuda.synchronize()
 
         #print("GPU: ", device, "Sample  SYnc Done")
+        self.Sampling_time += time.time() - sample_start
 
         index = batch[0].to(self.gids_device)
         index_size = len(index)   
-        self.Sampling_time += time.time() - sample_start
 
         orig_index_size_list = []
         gathered_index_size_list = []
@@ -864,6 +869,8 @@ class GIDS():
 
         my_bucket_list = []
         split_tensor_len = []
+
+        
 
         self.split_index_tensor(index, my_bucket_list, split_tensor_len, meta_data_list)
 
@@ -962,7 +969,9 @@ class GIDS():
         feature_read_start = time.time()
         index_ptr_list = self.create_ptr_list(gathered_index_list)
         gathered_torch_ptr_list = self.create_ptr_list(gathered_tensor_list)
-        self.BAM_FS.SA_read_feature_dist(gathered_torch_ptr_list, index_ptr_list, gathered_index_size_list, self.world_size, dim, self.cache_dim, 0)
+        with nvtx.annotate("Feature Aggregation", color="blue"):
+            self.BAM_FS.SA_read_feature_dist(gathered_torch_ptr_list, index_ptr_list, gathered_index_size_list, self.world_size, dim, self.cache_dim, 0)
+            
         self.agg_time += time.time() - feature_read_start
         
         # torch.cuda.synchronize()
@@ -978,9 +987,6 @@ class GIDS():
 
         # Gathering Minibatch Tensors
         self.gather_tensors(orig_tensor_list, gathered_tensor_list)
-
-        # torch.cuda.synchronize()
-        # print("GPU: ", device, "World Size: ", self.world_size,"\t\t Gather Tensor Done")
 
         # GPU to GPU memcpy
         gather_start = time.time()
@@ -1002,11 +1008,9 @@ class GIDS():
         # torch.cuda.synchronize()
         # print("GPU: ", device, "World Size: ", self.world_size,"\t\t Iter Done")
 
-
-        self.BAM_FS.prefetch_from_victim_queue()
-        # torch.cuda.synchronize()
-        # print("GPU: ", device, "World Size: ", self.world_size,"\t\t Prefetch VB Done")
-
+        with nvtx.annotate("Prefetching", color="red"):
+            self.BAM_FS.prefetch_from_victim_queue()
+ 
         return batch2
     
     def dist_SA_fetch_feature(self, dim, it, device):
@@ -1029,7 +1033,20 @@ class GIDS():
         feature_read_start = time.time()
         index_ptr_list = self.create_ptr_list(gathered_index_list)
         gathered_torch_ptr_list = self.create_ptr_list(gathered_tensor_list)
-        self.BAM_FS.SA_read_feature_dist(gathered_torch_ptr_list, index_ptr_list, gathered_index_size_list, self.world_size, dim, self.cache_dim, 0)
+        
+        torch.cuda.synchronize()
+        
+        return_torch2 =  torch.zeros([index_size,dim], dtype=torch.float, device=self.gids_device).contiguous()
+
+        with nvtx.annotate("Feature Aggregation", color="blue"):
+            #print("gather tensor: ", gathered_tensor_list)
+            #print("gather tensor 1: ", gathered_tensor_list[0])
+            self.BAM_FS.SA_read_feature_dist(gathered_torch_ptr_list, index_ptr_list, gathered_index_size_list, self.world_size, dim, self.cache_dim, 0)
+           
+           # self.BAM_FS.SA_read_feature(return_torch2.data_ptr(), batch[0].data_ptr(), index_size, dim, self.cache_dim, 0)
+            #self.BAM_FS.SA_read_feature(gathered_torch_ptr_list[0], index_ptr_list[0], gathered_index_size_list[0], dim, self.cache_dim, 0)
+
+
         self.agg_time += time.time() - feature_read_start
 
         # Gathering Minibatch Tensors
@@ -1037,21 +1054,24 @@ class GIDS():
 
 
         # GPU to GPU memcpy
-        gather_start = time.time()
-        return_torch =  torch.zeros([index_size,dim], dtype=torch.float, device=self.gids_device).contiguous()
+        with nvtx.annotate("GPU to GPU Memcpy", color="green"):
 
-        dist_gather_ptr_list = self.create_ptr_list(orig_tensor_list)
-        meta_ptr_list = self.create_ptr_list(meta_data_list)
-        self.BAM_FS.gather_feature_list(return_torch.data_ptr(),dist_gather_ptr_list, orig_index_size_list, self.world_size, dim,  self.rank, meta_ptr_list)
-        self.Gather_time += (time.time()) - gather_start
+            gather_start = time.time()
+            return_torch =  torch.zeros([index_size,dim], dtype=torch.float, device=self.gids_device).contiguous()
 
-        reset_start = time.time()
-        self.BAM_FS.reset_node_counter(self.cpu_index_len_tensor_ptr_list, self.world_size)
-        self.Reset_time += (time.time()) - reset_start
+            dist_gather_ptr_list = self.create_ptr_list(orig_tensor_list)
+            meta_ptr_list = self.create_ptr_list(meta_data_list)
+            self.BAM_FS.gather_feature_list(return_torch.data_ptr(),dist_gather_ptr_list, orig_index_size_list, self.world_size, dim,  self.rank, meta_ptr_list)
+            self.Gather_time += (time.time()) - gather_start
 
-        self.GIDS_time += time.time() - GIDS_time_start
-        #batch.append(return_torch)
-        batch2 = (*batch1, return_torch) 
+            reset_start = time.time()
+            self.BAM_FS.reset_node_counter(self.cpu_index_len_tensor_ptr_list, self.world_size)
+            self.Reset_time += (time.time()) - reset_start
+
+            self.GIDS_time += time.time() - GIDS_time_start
+            #batch.append(return_torch)
+        
+        batch2 = (*batch, return_torch) 
 
         return batch2
 

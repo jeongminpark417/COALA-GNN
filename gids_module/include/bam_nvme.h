@@ -124,6 +124,8 @@ struct BAM_Feature_Store {
   unsigned long long* prefetch_counter;
 
 
+  int low_priority;
+  int high_priority;
   cudaStream_t transfer_stream;
   cudaStream_t fill_stream;
 

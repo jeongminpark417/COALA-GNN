@@ -77,8 +77,8 @@ def track_acc_Multi_GIDS(rank, world_size, g, args, label_array=None):
         fan_out = [int(fanout) for fanout in args.fan_out.split(',')],
         batch_size = args.batch_size,
         use_WB = args.window_buffer,
-        use_PVP = True,
-        pvp_depth = 128,
+        use_PVP = args.use_PVP,
+        pvp_depth = (128*1024),
         debug_mode = False
     
     )
@@ -138,20 +138,21 @@ def track_acc_Multi_GIDS(rank, world_size, g, args, label_array=None):
     #     shuffle=True, drop_last=False,
     #     num_workers=args.num_workers)
 
-    test_dataloader = GIDS_DGLDataLoader(
-        g,
-        test_nid,
-        sampler,
-        args.batch_size,
-        dim,
-        GIDS_Loader,
-        shuffle=True,
-        drop_last=False,
-        num_workers=args.num_workers,
-        use_alternate_streams=False,
-        use_ddp=True,
-        device=device
-        )
+
+    # test_dataloader = GIDS_DGLDataLoader(
+    #     g,
+    #     test_nid,
+    #     sampler,
+    #     args.batch_size,
+    #     dim,
+    #     GIDS_Loader,
+    #     shuffle=True,
+    #     drop_last=False,
+    #     num_workers=args.num_workers,
+    #     use_alternate_streams=False,
+    #     use_ddp=True,
+    #     device=device
+    #     )
 
 
     if args.model_type == 'gcn':
@@ -171,8 +172,10 @@ def track_acc_Multi_GIDS(rank, world_size, g, args, label_array=None):
         )
 
     model = DDP(model,  device_ids=[rank])
+  #  model = DDP(model,  device_ids=[rank], find_unused_parameters=True)
 
-    warm_up_iter = 100
+    warm_up_iter = 20
+    test_iter = 20
     # Setup is Done
     for epoch in tqdm.tqdm(range(args.epochs)):
         epoch_start = time.time()
@@ -197,6 +200,7 @@ def track_acc_Multi_GIDS(rank, world_size, g, args, label_array=None):
                 print("warp up done")
                 train_dataloader.print_stats()
                 train_dataloader.print_timer()
+                print_times(transfer_time, train_time, e2e_time)
                 batch_input_time = 0
                 transfer_time = 0
                 train_time = 0
@@ -211,22 +215,23 @@ def track_acc_Multi_GIDS(rank, world_size, g, args, label_array=None):
 
             batch_labels = blocks[-1].dstdata['label']
             
-
-            blocks = [block.int().to(device) for block in blocks]
-            batch_labels = batch_labels.to(device)
+            with nvtx.annotate("Transfer", color="red"):
+                blocks = [block.int().to(device) for block in blocks]
+                batch_labels = batch_labels.to(device)
             transfer_time = transfer_time +  time.time()  - transfer_start
  
             # Model Training Stage
-            train_start = time.time()
-            batch_pred = model(blocks, batch_inputs)
-            loss = loss_fcn(batch_pred, batch_labels)
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
-            epoch_loss += loss.detach()                  
-            train_time = train_time + time.time() - train_start
+            with nvtx.annotate("Training", color="blue"):
+                train_start = time.time()
+                batch_pred = model(blocks, batch_inputs)
+                loss = loss_fcn(batch_pred, batch_labels)
+                optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
+                epoch_loss += loss.detach()                  
+                train_time = train_time + time.time() - train_start
           
-            if(step == warm_up_iter + 100):
+            if(step == warm_up_iter + test_iter):
                 print("Performance for 100 iteration after 1000 iteration")
                 e2e_time += time.time() - e2e_time_start 
                 train_dataloader.print_stats()
@@ -243,37 +248,38 @@ def track_acc_Multi_GIDS(rank, world_size, g, args, label_array=None):
         
         epoch_time = time.time() - epoch_time_start
         print("epoch time: ", epoch_time)
+        epoch_time = 0.0
         train_dataloader.print_stats()
 
        
   
     # Evaluation
 
-    model.eval()
-    predictions = []
-    labels = []
-    with torch.no_grad():
-        count = 0
-        for _, _, blocks,ret in test_dataloader:
-            if(count == 4):
-                break
-            blocks = [block.to(device) for block in blocks]
-            #inputs = blocks[0].srcdata['feat']
-            inputs = ret
+    # model.eval()
+    # predictions = []
+    # labels = []
+    # with torch.no_grad():
+    #     count = 0
+    #     for _, _, blocks,ret in test_dataloader:
+    #         if(count == 10):
+    #             break
+    #         blocks = [block.to(device) for block in blocks]
+    #         #inputs = blocks[0].srcdata['feat']
+    #         inputs = ret
      
-            if(args.data == 'IGB'):
-                labels.append(blocks[-1].dstdata['label'].cpu().numpy())
-            elif(args.data == 'OGB'):
-                out_label = torch.index_select(label_array, 0, b[1]).flatten()
-                labels.append(out_label.numpy())
-            predict = model(blocks, inputs).argmax(1).cpu().numpy()
-            predictions.append(predict)
+    #         if(args.data == 'IGB'):
+    #             labels.append(blocks[-1].dstdata['label'].cpu().numpy())
+    #         elif(args.data == 'OGB'):
+    #             out_label = torch.index_select(label_array, 0, b[1]).flatten()
+    #             labels.append(out_label.numpy())
+    #         predict = model(blocks, inputs).argmax(1).cpu().numpy()
+    #         predictions.append(predict)
 
-            count += 1
-        predictions = np.concatenate(predictions)
-        labels = np.concatenate(labels)
-        test_acc = sklearn.metrics.accuracy_score(labels, predictions)*100
-    print("Test Acc {:.2f}%".format(test_acc))
+    #         count += 1
+    #     predictions = np.concatenate(predictions)
+    #     labels = np.concatenate(labels)
+    #     test_acc = sklearn.metrics.accuracy_score(labels, predictions)*100
+    # print("Test Acc {:.2f}%".format(test_acc))
 
 
 
@@ -306,12 +312,12 @@ if __name__ == '__main__':
     parser.add_argument('--fan_out', type=str, default='10,15')
     parser.add_argument('--batch_size', type=int, default=1024)
     parser.add_argument('--num_workers', type=int, default=0)
-    parser.add_argument('--hidden_channels', type=int, default=128)
+    parser.add_argument('--hidden_channels', type=int, default=512)
     parser.add_argument('--learning_rate', type=float, default=0.01)
     parser.add_argument('--decay', type=float, default=0.001)
     parser.add_argument('--epochs', type=int, default=3)
     parser.add_argument('--num_layers', type=int, default=6)
-    parser.add_argument('--num_heads', type=int, default=4)
+    parser.add_argument('--num_heads', type=int, default=8)
     parser.add_argument('--log_every', type=int, default=2)
 
     #GIDS parameter
@@ -339,6 +345,7 @@ if __name__ == '__main__':
         help='Pytorch Tensor File for the list of nodes that will be pinned in the CPU feature buffer')
 
     parser.add_argument('--window_buffer', action='store_true', help='Enable Window Buffering')
+    parser.add_argument('--use_PVP', action='store_true', help='Enable PVP')
 
 
 

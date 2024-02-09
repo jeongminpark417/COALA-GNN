@@ -143,12 +143,13 @@ void BAM_Feature_Store<TYPE>::init_set_associative_cache(GIDS_Controllers GIDS_c
   }
 
   //uint64_t num_ways = 4;
+  cudaDeviceGetStreamPriorityRange(&low_priority, &high_priority);
 
   uint64_t num_sets = n_pages / num_ways;
   std::cout << "n sets: " << num_sets <<std::endl;
   std::cout << "n ways: " << num_ways << std::endl;
   std::cout << "use PVP: " << use_PVP << std::endl;
-  SA_handle = new GIDS_SA_handle<TYPE>(num_sets, num_ways, page_size, ctrls[0][0], ctrls, cudaDevice, use_WB, use_PVP, cudaDevice, wb_size, pvp_depth_size);
+  SA_handle = new GIDS_SA_handle<TYPE>(num_sets, num_ways, page_size, ctrls[0][0], ctrls, cudaDevice, use_WB, use_PVP, cudaDevice, num_gpus, wb_size, pvp_depth_size);
 
   cache_ptr = SA_handle -> get_ptr();
 
@@ -235,6 +236,9 @@ void BAM_Feature_Store<TYPE>::print_stats(){
   this->kernel_time = 0;
   std::cout << "Total Access: \t " << this->total_access << std::endl;
   this->total_access = 0;
+
+  SA_handle -> print_evicted_cl();
+  
 }
 
 
@@ -504,6 +508,7 @@ void BAM_Feature_Store<TYPE>::SA_read_feature(uint64_t i_ptr, uint64_t i_index_p
       t2 - t1); // Microsecond (as int)
   const float ms_fractional =
       static_cast<float>(us.count()) / 1000; // Milliseconds (as float)
+  printf("DEVICE: %llu kernel time for iteration:%f\n", (unsigned long long)cudaDevice, (float) ms_fractional);
 
   kernel_time += ms_fractional;
   total_access += num_index;
@@ -527,13 +532,18 @@ const std::vector<uint64_t>&  index_size_list, int num_gpu, int dim, int cache_d
   auto t1 = Clock::now();
 
   for (int i = 0; i < num_gpu; i++) {
+  //for (int i = 0; i < 1; i++) {
+
       TYPE *tensor_ptr = (TYPE *)(i_return_ptr_list[i]);
       int64_t *index_ptr = (int64_t *)(i_index_ptr_list[i]);
       uint64_t index_size = index_size_list[i];
 
+      //printf("index size: %llu\n", index_size);
+
       uint64_t b_size = 32;
       uint64_t n_warp = b_size / 32;
       uint64_t g_size = (index_size+n_warp - 1) / n_warp;
+    //auto t1 = Clock::now();
 
       if(use_PVP){
       //  printf("PVP read feature\n");
@@ -548,7 +558,10 @@ const std::vector<uint64_t>&  index_size_list, int num_gpu, int dim, int cache_d
       total_access += index_size;
   }
 
-  cuda_err_chk(cudaDeviceSynchronize());
+  for (int i = 0; i < num_gpu; i++) {
+    cuda_err_chk(cudaStreamSynchronize(streams[i]));
+  }  
+  //cuda_err_chk(cudaDeviceSynchronize());
 
   auto t2 = Clock::now();
   auto us = std::chrono::duration_cast<std::chrono::microseconds>(
@@ -559,6 +572,8 @@ const std::vector<uint64_t>&  index_size_list, int num_gpu, int dim, int cache_d
       static_cast<float>(us.count()) / 1000; // Milliseconds (as float)
 
   kernel_time += ms_fractional;
+
+  //printf("kernel time for iteration:%f\n", (float) ms_fractional);
 
   if(use_PVP){
     for(int i  = 0; i < n_gpus; i++){
@@ -717,7 +732,8 @@ void BAM_Feature_Store<TYPE>::update_reuse_counters(uint64_t batch_array_idx, ui
 
 template <typename TYPE>
 void BAM_Feature_Store<TYPE>::prefetch_from_victim_queue(){
-  //cudaStreamCreateWithPriority (&transfer_stream,cudaStreamNonBlocking, low_priority);
+  cudaStreamCreateWithPriority (&transfer_stream,cudaStreamNonBlocking, low_priority);
+
   num_evicted_cl =  SA_handle -> prefetch_from_victim_queue(PVP_pinned_data, PVP_pinned_idx, head_ptr, transfer_stream);
 
   unsigned int GPU = SA_handle ->  my_GPU_id_;
@@ -748,7 +764,7 @@ void BAM_Feature_Store<TYPE>::fill_batch(){
   cuda_err_chk(cudaDeviceSynchronize());
 
 
-  //cudaStreamDestroy(transfer_stream);
+  cudaStreamDestroy(transfer_stream);
 
   return;
 }

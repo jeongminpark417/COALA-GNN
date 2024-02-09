@@ -2,6 +2,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 from dgl import apply_each
 from dgl.nn.pytorch import GATConv, GraphConv, SAGEConv, HeteroGraphConv
+import dgl.nn.pytorch as dglnn
+
 
 class SAGE(nn.Module):
     def __init__(self, in_feats, h_feats, num_classes, num_layers=2, dropout=0.2):
@@ -44,27 +46,78 @@ class GCN(nn.Module):
                 h = F.relu(h)
         return h
 
+# class GAT(nn.Module):
+#     def __init__(self, in_feats, h_feats, num_classes, num_heads, num_layers=2, dropout=0.2):
+#         super(GAT, self).__init__()
+#         self.layers = nn.ModuleList()
+#         self.layers.append(GATConv(in_feats, h_feats, num_heads))
+#         for _ in range(num_layers-2):
+#             self.layers.append(GATConv(h_feats * num_heads, h_feats, num_heads))
+#         self.layers.append(GATConv(h_feats * num_heads, num_classes, num_heads))
+#         self.dropout = nn.Dropout(dropout)
+
+#    def forward(self, blocks, x):
+#        h = x
+#        for l, (layer, block) in enumerate(zip(self.layers, blocks)):
+#            h_dst = h[:block.num_dst_nodes()]
+#            if l < len(self.layers) - 1:
+#                h = layer(block, (h, h_dst)).flatten(1)
+#                h = F.relu(h)
+#                h = self.dropout(h)
+#            else:
+#                h = layer(block, (h, h_dst)).mean(1)  
+#        return h
+
 class GAT(nn.Module):
-    def __init__(self, in_feats, h_feats, num_classes, num_heads, num_layers=2, dropout=0.2):
-        super(GAT, self).__init__()
+    def __init__(
+        self, in_feats, n_hidden, n_classes, n_layers, num_heads
+    ):
+        super().__init__()
+        self.n_layers = n_layers
+        self.n_hidden = n_hidden
+        self.n_classes = n_classes
         self.layers = nn.ModuleList()
-        self.layers.append(GATConv(in_feats, h_feats, num_heads))
-        for _ in range(num_layers-2):
-            self.layers.append(GATConv(h_feats * num_heads, h_feats, num_heads))
-        self.layers.append(GATConv(h_feats * num_heads, num_classes, num_heads))
-        self.dropout = nn.Dropout(dropout)
+        self.layers.append(
+            dglnn.GATConv(
+                (in_feats, in_feats),
+                n_hidden,
+                num_heads=num_heads
+            )
+        )
+        for i in range(1, n_layers - 1):
+            self.layers.append(
+                dglnn.GATConv(
+                    (n_hidden * num_heads, n_hidden * num_heads),
+                    n_hidden,
+                    num_heads=num_heads
+                )
+            )
+        self.layers.append(
+            dglnn.GATConv(
+                (n_hidden * num_heads, n_hidden * num_heads),
+                n_classes,
+                num_heads=num_heads,
+                activation=None,
+            )
+        )
 
     def forward(self, blocks, x):
         h = x
         for l, (layer, block) in enumerate(zip(self.layers, blocks)):
-            h_dst = h[:block.num_dst_nodes()]
-            if l < len(self.layers) - 1:
+            # We need to first copy the representation of nodes on the RHS from the
+            # appropriate nodes on the LHS.
+            # Note that the shape of h is (num_nodes_LHS, D) and the shape of h_dst
+            # would be (num_nodes_RHS, D)
+            h_dst = h[: block.num_dst_nodes()]
+            # Then we compute the updated representation on the RHS.
+            # The shape of h now becomes (num_nodes_RHS, D)
+            if l < self.n_layers - 1:
                 h = layer(block, (h, h_dst)).flatten(1)
-                h = F.relu(h)
-                h = self.dropout(h)
             else:
-                h = layer(block, (h, h_dst)).mean(1)  
-        return h
+                h = layer(block, (h, h_dst))
+        h = h.mean(1)
+        return h.log_softmax(dim=-1)
+
 
 
 class RGCN(nn.Module):
