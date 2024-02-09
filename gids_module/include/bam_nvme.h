@@ -128,6 +128,8 @@ struct BAM_Feature_Store {
   int high_priority;
   cudaStream_t transfer_stream;
   cudaStream_t fill_stream;
+  cudaStream_t update_stream;
+
 
   float kernel_time = 0; 
   bool first = true;

@@ -264,6 +264,9 @@ class GIDS():
 
         # Window Buffering MetaData for Prefetcing
         self.use_WB = use_WB
+        #PVP need use_WB
+        if(use_PVP):
+            self.use_WB = True
         self.wb_size = wb_size
         self.wb_init = False
 
@@ -948,15 +951,11 @@ class GIDS():
         wb_index_list_tensor = self.create_ptr_list_tensor_2D(self.wb_gathered_index_list, device)
         wb_size_list_tensor = self.create_tensor_from_list_2D(self.wb_gathered_index_size_list)
 
-        self.BAM_FS.update_reuse_counters(wb_index_list_tensor.data_ptr(), wb_size_list_tensor.data_ptr(), self.max_sample_size, self.world_size, self.wb_size)
+        with nvtx.annotate("Update Counters", color="red"):
+            self.BAM_FS.update_reuse_counters(wb_index_list_tensor.data_ptr(), wb_size_list_tensor.data_ptr(), self.max_sample_size, self.world_size, self.wb_size)
 
-        # torch.cuda.synchronize()
-        # print("GPU: ", device, "World Size: ", self.world_size,"\t\t Reuse Counter Done")
-
-
-        # Fill Batch
-        #print("GPU ID: ",self.device_id , " len batch: ", gathered_index_size_list)
-        self.BAM_FS.fill_batch()
+        with nvtx.annotate("Fill Batch", color="green"):
+            self.BAM_FS.fill_batch()
         #torch.cuda.synchronize()
 
         #print("GPU: ", device,"World Size: ", self.world_size, "\t\t Fill Batch Done")

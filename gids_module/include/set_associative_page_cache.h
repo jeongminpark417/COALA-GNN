@@ -723,7 +723,6 @@ struct SA_cache_d_t {
                 //if(evicted_batch_id_test >=8000 )printf("wrong evict: %llu GPU: %llu\n", evicted_batch_id_test, GPU_id);
                 evict_to_pvp(evicted_batch_id, (uint64_t*) cl_src, CL_SIZE, reuse_val, head_ptr, lane);
                 //victim_buffer.evict_to_pvp(evicted_batch_id, (uint64_t*) cl_src, CL_SIZE, reuse_val, head_ptr, lane);
-
                 //if(threadIdx.x % 32 == 0) printf("GPU: %llu evict to pvp KEY:%llu batch_id:%llu my GPU id:%u reuse_val:%llu GPU_id:%llu num_idx:%llu \n",(unsigned long long) GPU_id, (unsigned long long)old_key, (unsigned long long)evicted_batch_id_test, (unsigned) my_GPU_id_, (unsigned long long)reuse_val,(unsigned long long) GPU_id, (unsigned long long)num_idx);
             }
         }
@@ -783,8 +782,8 @@ struct SA_cache_d_t {
 
                 update_val = (update_val | batch_idx | gpu_b);
 
-               // atomicMin((unsigned long long int*) (cur_next_reuse + i), (unsigned long long int) update_val);
-                atomicMin((unsigned long long int*) (cur_next_reuse + i), (unsigned long long int) 0);
+                atomicMin((unsigned long long int*) (cur_next_reuse + i), (unsigned long long int) update_val);
+               // atomicMin((unsigned long long int*) (cur_next_reuse + i), (unsigned long long int) 0);
 
 
             }
@@ -908,7 +907,7 @@ struct GIDS_SA_handle{
         cudaMalloc((void**)&cache_ptr, sizeof(SA_cache_d_t<T>));
 
 
-        if(use_WB){
+        if(use_WB | use_PVP){
             cudaMalloc((void**)&next_reuse_, (uint64_t) sizeof(uint64_t) * num_sets_ * num_ways_);
             cudaMemset(next_reuse_, 0xFF, (uint64_t) sizeof(uint64_t) * num_sets_ * num_ways_);
 
