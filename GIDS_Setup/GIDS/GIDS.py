@@ -56,6 +56,10 @@ class _PrefetchingIter(object):
         self.dataloader = dataloader
         self.graph_sampler = self.dataloader.graph_sampler
         self.GIDS_Loader=GIDS_Loader
+        if(self.GIDS_Loader.eviction_policy == 1 or self.GIDS_Loader.eviction_policy == 3 ):
+            self.static_info = True
+        else:
+            self.static_info = False
         
     def __iter__(self):
         return self
@@ -70,6 +74,12 @@ class _PrefetchingIter(object):
             batch = self.GIDS_Loader.distributed_fetch_feature(self.dataloader.dim, cur_it, self.GIDS_Loader.gids_device)
         else:
             batch = self.GIDS_Loader.fetch_feature(self.dataloader.dim, cur_it, self.GIDS_Loader.gids_device)
+
+        # if(self.static_info):
+        #     batch_SI = self.GIDS_Loader.get_static_info(batch)
+        #     print("batch_SI: ", batch_SI)
+        #     return (batch, batch_SI)
+        # else:
         return batch
 
 
@@ -231,7 +241,10 @@ class GIDS():
         use_WB = False,
         use_PVP = False,
         pvp_depth = 128, 
-        debug_mode = False):
+        eviction_policy = None,
+        static_info_file = None,
+        debug_mode = False,
+        refresh_time = 1):
         #self.sample_type = "LADIES"
 
         if(long_type):
@@ -284,7 +297,7 @@ class GIDS():
 
         # PVP
         self.fill_batch_flag_list = []
-
+        self.refresh_time = refresh_time
         # Cache Parameters
         self.set_associative_cache = set_associative_cache
         self.page_size = page_size
@@ -293,7 +306,35 @@ class GIDS():
         self.cache_size = cache_size
         self.num_ways = num_ways
         self.num_ssd = num_ssd
-       
+
+
+        # Eviction Policy
+        # 0: round robin
+        # 1: static
+        # 2: dynamic
+        # 3: hybrid
+
+        if(eviction_policy == None or eviction_policy == "round_robind"):
+            print(" GIDS eviction policy: round_robind")
+            self.eviction_policy = 0
+    
+        elif(eviction_policy == 'static'):
+            print(" GIDS eviction policy: static")
+            self.eviction_policy = 1
+        
+        elif(eviction_policy == 'dynamic'):
+            print(" GIDS eviction policy: dynamic")
+            self.eviction_policy = 2
+        
+        elif(eviction_policy == 'hybrid'):
+            print(" GIDS eviction policy: hybrid")
+            self.eviction_policy = 3
+        
+        else:
+            print("Only support 0: round robind, 1: static, 2: dynamic, and 3: hybrid evictio policies")
+            self.eviction_policy = 0
+        
+
         #True if the graph is heterogenous graph
         self.heterograph = heterograph
         self.heterograph_map = heterograph_map
@@ -318,12 +359,21 @@ class GIDS():
 
         if(set_associative_cache):
             if(debug_mode):
-                self.BAM_FS.init_set_associative_cache(self.GIDS_controller, page_size, off, cache_size, world_size, num_ele, self.num_ssd, num_ways, self.use_WB, self.use_PVP, self.wb_size, self.pvp_depth, self.max_sample_size, 1)
+                self.BAM_FS.init_set_associative_cache(self.GIDS_controller, page_size, off, cache_size, world_size, num_ele, self.num_ssd, num_ways, self.use_WB, self.use_PVP, self.wb_size, self.pvp_depth, self.max_sample_size, self.refresh_time, self.eviction_policy, 1)
             else:
-                self.BAM_FS.init_set_associative_cache(self.GIDS_controller, page_size, off, cache_size, world_size, num_ele, self.num_ssd, num_ways, self.use_WB, self.use_PVP, self.wb_size, self.pvp_depth, self.max_sample_size, 0)
+                self.BAM_FS.init_set_associative_cache(self.GIDS_controller, page_size, off, cache_size, world_size, num_ele, self.num_ssd, num_ways, self.use_WB, self.use_PVP, self.wb_size, self.pvp_depth, self.max_sample_size, self.refresh_time, self.eviction_policy, 0)
 
         else:
             self.BAM_FS.init_controllers(self.GIDS_controller, page_size, off, cache_size,num_ele, self.num_ssd)
+
+
+        if(self.eviction_policy == 1 or self.eviction_policy == 3):
+            if(static_info_file == None):
+                print("Need static informatio binary file!")
+            else:
+                print("Static information file: ", static_info_file)
+            self.BAM_FS.create_static_info_buffer(static_info_file)
+        
 
 
         if(use_ddp):
@@ -688,7 +738,18 @@ class GIDS():
             index_size = len(index)
             index_ptr = index.data_ptr()
             return_torch =  torch.zeros([index_size,dim], dtype=torch.float, device=self.gids_device).contiguous()
-            self.BAM_FS.SA_read_feature(return_torch.data_ptr(), index_ptr, index_size, dim, self.cache_dim, 0)
+
+            
+
+            static_info_ten = None
+            static_info_data_ptr = 0
+            if(self.eviction_policy == 1 or self.eviction_policy == 3):
+                static_info_ten = self.get_static_info(batch)
+                static_info_data_ptr = static_info_ten.data_ptr()
+
+
+
+            self.BAM_FS.SA_read_feature(return_torch.data_ptr(), index_ptr, index_size, dim, self.cache_dim, 0, static_info_data_ptr)
 
             self.GIDS_time += time.time() - GIDS_time_start
 
@@ -721,11 +782,15 @@ class GIDS():
             cur_list =  [tensor.data_ptr() for tensor in cur_tensor]
             pointer_list.extend(cur_list)
 
-    def create_ptr_list_tensor_2D(self, tensor_list, device):
+    def create_ptr_list_tensor_2D(self, tensor_list, device, skip = 0):
         #print("GPU: ", device, "GIDS device: ", self.gids_device, "World Size: ", self.world_size,"\t\t create_ptr_list_tensor_2D Start tensor list:", tensor_list)
 
         pointer_list = []
+        counter = 0
         for cur_tensor in tensor_list:
+            if(counter < skip):
+                counter += 1
+                continue
             cur_list =  [tensor.data_ptr() for tensor in cur_tensor]
             pointer_list.extend(cur_list)
         
@@ -738,12 +803,15 @@ class GIDS():
    
         return pointer_tensor
 
-    def create_tensor_from_list_2D(self, tensor_list):
+    def create_tensor_from_list_2D(self, tensor_list, skip = 0):
         data_list = []
+        counter = 0
         for cur_tensor in tensor_list:
-
+            if(counter < skip):
+                counter += 1
+                continue
             for tensor in cur_tensor:
-                data_list.append(tensor.item())
+                data_list.append(tensor)
         
         pointer_tensor = torch.tensor(data_list, dtype=torch.int64, device=self.gids_device).contiguous()        
         return pointer_tensor
@@ -817,7 +885,7 @@ class GIDS():
             # cur_return_torch =  torch.zeros([cur_len,dim], dtype=torch.float, device=self.gids_device).contiguous()
             # gathered_tensor_list.append(cur_return_torch)
 
-            gathered_index_size_list.append(cur_len)
+            gathered_index_size_list.append(cur_len.item())
 
             cur_index_torch = torch.zeros([cur_len], dtype=torch.int64, device=self.gids_device).contiguous()
             gathered_index_list.append(cur_index_torch)
@@ -850,16 +918,8 @@ class GIDS():
 
 
     def distribute_index(self, dim, it, device):
-        #print("GPU: ", device, "Distribute start")
-        #torch.cuda.synchronize()
-        #print("GPU: ", device, "Distribute SYnc done")
         sample_start = time.time()
         batch = next(it)
-        #print("GPU: ", device, "Sample Done")
-
-        #torch.cuda.synchronize()
-
-        #print("GPU: ", device, "Sample  SYnc Done")
         self.Sampling_time += time.time() - sample_start
 
         index = batch[0].to(self.gids_device)
@@ -873,14 +933,7 @@ class GIDS():
         my_bucket_list = []
         split_tensor_len = []
 
-        
-
         self.split_index_tensor(index, my_bucket_list, split_tensor_len, meta_data_list)
-
-        # torch.cuda.synchronize()
-        # print("GPU: ", device, "Split done idx len: ", len(index),"split: ", split_tensor_len)
-        # print("GPU: ", device, "Split done index len tensor list: ", self.index_len_tensor_list)
-        # print("GPU: ", device, "Split done gather index: ", self.gathered_index_len_tensor_list)
 
         # Gather Node list counter
         gather_start = time.time()
@@ -891,19 +944,10 @@ class GIDS():
             dist.gather(self.index_len_tensor_list[i], cur_list, dst=i)
         
         self.Communication_time += (time.time() - gather_start)
-        # torch.cuda.synchronize()
-        # print("GPU: ", device, "Gather done")
-        # Allocate Tensors
-
-        #print("GPU ID: ", device," gather 2 done, orig index size list: ", orig_index_size_list)
 
         self.communication_setup(dim, orig_index_size_list, gathered_index_list, gathered_index_size_list)
-        # print("GPU ID: ", device," gather 2 done, gather index size list: ", gathered_index_size_list)
-        # print("GPU ID: ", device," gather 2 done, my_bucket_list list: ", len(my_bucket_list[0]), " two:", len(my_bucket_list[1]))
-
         self.gather_tensors(gathered_index_list, my_bucket_list)
-      #  print("GPU ID: ", device," gather 2 done, orig index size list: ", orig_index_size_list)
-        # torch.cuda.synchronize()
+
 
         # print("GPU: ", device, "Gather2 done")
         self.wb_batch_buffer.append(batch)
@@ -913,13 +957,10 @@ class GIDS():
         self.wb_meta_data_list.append(meta_data_list)
         torch.cuda.synchronize()
 
-        #print("GPU: ", device, "distribute done")
-
-        #print("GPU ID: ", device, " distribute_index done")
         
     def init_WB(self, dim, it, device):
         #print( "World Size: ", self.world_size, " WB size: ", self.wb_size)
-        for i in range(self.wb_size):
+        for i in range(self.wb_size + 1):
             self.distribute_index(dim, it, device)
         self.wb_init = True
 
@@ -928,12 +969,7 @@ class GIDS():
         if(self.wb_init == False):
             self.init_WB(dim, it, device)
 
-
-        #print("init WB done")
         self.distribute_index(dim, it, device)
-
-        #print("GPU: ", device, "World Size: ", self.world_size, "\t\t distribute all done")
-
 
         batch = self.wb_batch_buffer.pop(0)
         orig_index_size_list = self.wb_orig_index_size_list.pop(0)
@@ -944,16 +980,15 @@ class GIDS():
         
         torch.cuda.synchronize()
 
-        #print("GPU: ", device, "World Size: ", self.world_size,"\t\t Reuse Counter Start")
+        # # Updating Reuse Value
+        # wb_index_list_tensor = self.create_ptr_list_tensor_2D(self.wb_gathered_index_list, device)
+        # wb_size_list_tensor = self.create_tensor_from_list_2D(self.wb_gathered_index_size_list)
+
+        # with nvtx.annotate("Update Counters", color="red"):
+        #     self.BAM_FS.update_reuse_counters(wb_index_list_tensor.data_ptr(), wb_size_list_tensor.data_ptr(), self.max_sample_size, self.world_size, self.wb_size)
 
 
-        # Updating Reuse Value
-        wb_index_list_tensor = self.create_ptr_list_tensor_2D(self.wb_gathered_index_list, device)
-        wb_size_list_tensor = self.create_tensor_from_list_2D(self.wb_gathered_index_size_list)
-
-        with nvtx.annotate("Update Counters", color="red"):
-            self.BAM_FS.update_reuse_counters(wb_index_list_tensor.data_ptr(), wb_size_list_tensor.data_ptr(), self.max_sample_size, self.world_size, self.wb_size)
-
+        
         with nvtx.annotate("Fill Batch", color="green"):
             self.BAM_FS.fill_batch()
         #torch.cuda.synchronize()
@@ -968,22 +1003,17 @@ class GIDS():
         feature_read_start = time.time()
         index_ptr_list = self.create_ptr_list(gathered_index_list)
         gathered_torch_ptr_list = self.create_ptr_list(gathered_tensor_list)
+
+        static_info_ten_list = []
+        staic_info_ten_ptr_list = []
+        if(self.eviction_policy == 1 or self.eviction_policy == 3):
+            static_info_ten_list, staic_info_ten_ptr_list = self.get_static_info_dist(index_ptr_list, gathered_index_size_list)
+
         with nvtx.annotate("Feature Aggregation", color="blue"):
-            self.BAM_FS.SA_read_feature_dist(gathered_torch_ptr_list, index_ptr_list, gathered_index_size_list, self.world_size, dim, self.cache_dim, 0)
+            self.BAM_FS.SA_read_feature_dist(gathered_torch_ptr_list, index_ptr_list, gathered_index_size_list, self.world_size, dim, self.cache_dim, 0, staic_info_ten_ptr_list)
             
         self.agg_time += time.time() - feature_read_start
         
-        # torch.cuda.synchronize()
-        # print("GPU: ", device, "World Size: ", self.world_size,"\t\t Feature Agg Batch Done")
-
-        # # Debugging
-        # print("Writing VB idx")
-        # for i in range(self.wb_size):
-        #     print("GPU ID: ", self.gids_device, " WB idx: ", i)
-        #     self.BAM_FS.print_victim_buffer_data(i * self.pvp_depth ,4)
-
-
-
         # Gathering Minibatch Tensors
         self.gather_tensors(orig_tensor_list, gathered_tensor_list)
 
@@ -1001,14 +1031,18 @@ class GIDS():
         self.Reset_time += (time.time()) - reset_start
 
         self.GIDS_time += time.time() - GIDS_time_start
-        #batch.append(return_torch)
         batch2 = (*batch, return_torch) 
-        
-        # torch.cuda.synchronize()
-        # print("GPU: ", device, "World Size: ", self.world_size,"\t\t Iter Done")
 
         with nvtx.annotate("Prefetching", color="red"):
             self.BAM_FS.prefetch_from_victim_queue()
+
+        # Updating Reuse Value
+        wb_index_list_tensor = self.create_ptr_list_tensor_2D(self.wb_gathered_index_list, device, 1)
+        wb_size_list_tensor = self.create_tensor_from_list_2D(self.wb_gathered_index_size_list, 1)
+
+        with nvtx.annotate("Update Counters", color="red"):
+            self.BAM_FS.update_reuse_counters(wb_index_list_tensor.data_ptr(), wb_size_list_tensor.data_ptr(), self.max_sample_size, self.world_size, self.wb_size)
+
  
         return batch2
     
@@ -1024,6 +1058,10 @@ class GIDS():
         meta_data_list = self.wb_meta_data_list.pop(0)
         index_size = len(batch[0]) 
 
+        # print("GPU: ",self.rank, "batch: ", batch)
+        #batch_SI = self.get_static_info(batch)
+        # print("GPU: ", self.rank," batch SI: ", batch_SI)
+
         # Feature Aggregation
         orig_tensor_list = []
         gathered_tensor_list = []
@@ -1037,14 +1075,15 @@ class GIDS():
         
         return_torch2 =  torch.zeros([index_size,dim], dtype=torch.float, device=self.gids_device).contiguous()
 
-        with nvtx.annotate("Feature Aggregation", color="blue"):
-            #print("gather tensor: ", gathered_tensor_list)
-            #print("gather tensor 1: ", gathered_tensor_list[0])
-            self.BAM_FS.SA_read_feature_dist(gathered_torch_ptr_list, index_ptr_list, gathered_index_size_list, self.world_size, dim, self.cache_dim, 0)
-           
-           # self.BAM_FS.SA_read_feature(return_torch2.data_ptr(), batch[0].data_ptr(), index_size, dim, self.cache_dim, 0)
-            #self.BAM_FS.SA_read_feature(gathered_torch_ptr_list[0], index_ptr_list[0], gathered_index_size_list[0], dim, self.cache_dim, 0)
 
+        static_info_ten_list = []
+        staic_info_ten_ptr_list = []
+        if(self.eviction_policy == 1 or self.eviction_policy == 3):
+            static_info_ten_list, staic_info_ten_ptr_list = self.get_static_info_dist(index_ptr_list, gathered_index_size_list)
+
+        with nvtx.annotate("Feature Aggregation", color="blue"):
+            self.BAM_FS.SA_read_feature_dist(gathered_torch_ptr_list, index_ptr_list, gathered_index_size_list, self.world_size, dim, self.cache_dim, 0, staic_info_ten_ptr_list)
+    
 
         self.agg_time += time.time() - feature_read_start
 
@@ -1073,6 +1112,31 @@ class GIDS():
         batch2 = (*batch, return_torch) 
 
         return batch2
+
+    def get_static_info(self, batch):
+        index_ten = batch[0]
+        index_size = len(index_ten)
+        static_info_ten =  torch.zeros(index_size, dtype=torch.uint8, device=self.gids_device).contiguous()
+
+        self.BAM_FS.get_static_info(static_info_ten.data_ptr(), index_ten.data_ptr(), len(index_ten))
+        return static_info_ten
+
+    
+    def get_static_info_dist(self, index_ptr_list, gathered_index_size_list):
+
+        static_info_ten_list = []
+        static_info_ten_ptr_list = []
+        for i in range(self.world_size):
+            batch_len = gathered_index_size_list[i]
+            static_info_ten =  torch.zeros(batch_len, dtype=torch.uint8, device=self.gids_device).contiguous()
+            static_info_ten_list.append(static_info_ten)
+            static_info_ten_ptr_list.append(static_info_ten.data_ptr())
+
+
+        self.BAM_FS.get_static_info_dist(static_info_ten_ptr_list, index_ptr_list, gathered_index_size_list)
+        return (static_info_ten_list, static_info_ten_ptr_list)
+
+
 
     def print_stats(self):
         print("GIDS time: ", self.GIDS_time)

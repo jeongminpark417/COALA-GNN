@@ -22,13 +22,24 @@
 #include "nvm_cmd.h"
 //#include "window_buffer.h"
 
-#define  RR 0x01
-#define  EP_WINDOW 0x02
+// #define  RR 0x01
+// #define  EP_WINDOW 0x02
+
+enum Eviction_Policy {
+    RR,
+    Static,
+    Dynamic,
+    Hybrid
+};
 
 #define FULL_MASK 0xFFFFFFFF
 #define FF_64 0xFFFFFFFFFFFFFFFF
+#define FE_64 0xFFFEFFFFFFFFFFFF
+
 #define FF_48 0xFFFFFFFFFFFFFF
 #define FF_16 0xFFFF
+#define FE_16 0xFFFE
+
 
 template <typename T = float>
  __forceinline__
@@ -185,7 +196,7 @@ class Victim_Buffer {
         if(tid == 0){
             buffer_idx = atomicAdd((unsigned long long*)queue_counters + q_id, (unsigned long long)1);
             if(buffer_idx < buffer_depth){
-                printf("buffer_depth:%llu\n", buffer_depth);
+                //printf("buffer_depth:%llu\n", buffer_depth);
                 index_arrays[buffer_idx + buffer_depth * q_id] = evicted_batch_index;
             }
         }
@@ -258,9 +269,9 @@ struct SA_cache_d_t {
 
     unsigned int my_GPU_id_;
 
-    //need to be changed (RR : RoundRobin, EP_WINDOW: Window Buffering)
     //uint8_t evict_policy = EP_WINDOW;
-    uint8_t evict_policy = RR;
+    uint8_t evict_policy;
+    uint8_t* static_info_;
 
 
     bool use_WB;
@@ -297,7 +308,7 @@ struct SA_cache_d_t {
                 uint64_t* next_reuse, bool WB_flag, bool PVP_flag,
                 // Victim_Buffer VB,
                 uint32_t n_buffers, uint32_t b_depth, uint64_t* q_counters,   uint64_t* index_arrays, uint64_t* data_arrays,
-                unsigned int my_GPU_id, unsigned n_gpus
+                unsigned int my_GPU_id, unsigned n_gpus, uint8_t ep, uint8_t* static_info_p
                  ) :
         set_locks_(set_locks),
         way_locks_(way_locks),
@@ -327,20 +338,18 @@ struct SA_cache_d_t {
         index_arrays_(index_arrays),
         data_arrays_(data_arrays),
         my_GPU_id_(my_GPU_id),
-        num_gpus(n_gpus)
+        num_gpus(n_gpus),
+        evict_policy(ep),
+        static_info_(static_info_p)
         //victim_buffer(VB) 
 
         {
         double_read = 0;
         hit_cnt = 0;
         miss_cnt = 0;
-      //  victim_buffer = VB;
 
-        if(WB_flag){
-            printf("eviction policy is EP_WINDOW\n");
-            evict_policy = EP_WINDOW;
+
         }
-    }
 
     __forceinline__
     __device__
@@ -460,48 +469,236 @@ struct SA_cache_d_t {
     __forceinline__
     __device__
     uint32_t 
-    reuse_based_evict(uint32_t lane, uint32_t leader, uint32_t mask,  uint64_t set_id){
+    dynamic_evict(uint32_t lane, uint32_t leader, uint32_t mask,  uint64_t set_id){
 
         unsigned next_reuse = 0xFFFF;
-        // No Memory Consistency is guaranteed here for now, but it should not affect accuracy
-        // NEED TO FIX
         if(lane < num_ways){
             uint64_t next_reuse_full = next_reuse_[set_id * num_ways + lane];
             next_reuse = (unsigned) (next_reuse_full >> 48);
-            if(next_reuse < 128){
-               // printf("next reuse:%u\n", next_reuse);
-            }
         }
 
         unsigned next_reuse_min = __reduce_max_sync(mask, next_reuse);
-        // No reuse
-        if(next_reuse_min == 0xFFFF){
-          //  if(lane == leader) printf("No reuse\n");
-            return round_robin_evict(lane, leader, mask, set_id);
-        }
 
         unsigned way = 0xFFFF;
         if(next_reuse == next_reuse_min){
             way = lane;
         }
         way = __reduce_min_sync(mask, way);
-        //if(lane == leader) printf("evicted way: %u next_reuse_min:%u\n", way, next_reuse_min);
         return way;
 
-      //   return (set_cnt_[set_id]++) % num_ways;
+     }
+
+         __forceinline__
+    __device__
+    uint32_t 
+    dynamic_pvp_evict(uint32_t lane, uint32_t leader, uint32_t mask,  uint64_t set_id){
+
+        unsigned next_reuse = 0xFFFF;
+        unsigned temp = 0;
+        if(lane < num_ways){
+            uint64_t next_reuse_full = next_reuse_[set_id * num_ways + lane];
+            next_reuse = (unsigned) (next_reuse_full >> 48);
+        }
+
+        if(next_reuse != 0xFFFE && next_reuse != 0xFFFF) temp = next_reuse + 1;
+
+        unsigned next_reuse_min = __reduce_max_sync(mask, temp);
+
+        //No cache line with next reuse tag
+        if(next_reuse_min == 0){
+            temp = next_reuse;
+            next_reuse_min = __reduce_max_sync(mask, temp);
+        }
+        
+        unsigned way = 0xFFFF;
+        if(next_reuse == next_reuse_min){
+            way = lane;
+        }
+        way = __reduce_min_sync(mask, way);
+        return way;
+        
+
+     }
+
+    __forceinline__
+    __device__
+    uint32_t
+    static_evict(uint32_t lane, uint32_t leader, uint32_t mask,  uint64_t set_id){
+        
+       unsigned static_val = static_info_[set_id * num_ways + lane];
+        
+        unsigned min_static_val = __reduce_min_sync(mask, static_val);
+        unsigned way = 0xFFFF;
+        if(static_val == min_static_val){
+            way = lane;
+        }
+        way = __reduce_min_sync(mask, way);
+        return way;
+
     }
+
+
+// 
+// 1. From nodes with no reuse (dynamic information), pick the lowest page rank value (static information)
+// 2. From nodes with reuse value that is lower than the threshold, pick the lowest page rank value
+// 3. From the recently inserted nodes (No dynamic information), pick the lowest page rank value
+// 4. From nodes with reuse value that is higher than the threshold, pick the lowest page rank value
+
+    __forceinline__
+    __device__
+    uint32_t
+    hybrid_evict(uint32_t lane, uint32_t leader, uint32_t mask,  uint64_t set_id){
+
+        //FIX
+        uint32_t th = num_buffers / 8;
+
+        uint64_t next_reuse_full = next_reuse_[set_id * num_ways + lane];
+        unsigned next_reuse = (unsigned) (next_reuse_full >> 48);
+        uint8_t static_val = static_info_[set_id * num_ways + lane];
+        
+        unsigned way = 0xFFFF;
+
+        unsigned  temp = 0x7000;
+        if(next_reuse == 0xFFFF) temp = static_val;
+        unsigned  reduce_temp = __reduce_min_sync(mask, temp);
+        //Case 1
+        if(reduce_temp != 0x7000){
+            if(reduce_temp == temp){
+                way = lane;
+            }
+            way = __reduce_min_sync(mask, way);
+            return way;
+        }
+        
+        temp = 0x7000;
+        if(next_reuse > th && next_reuse != 0xFFFE) temp = static_val;
+        reduce_temp = __reduce_min_sync(mask, temp);
+        //Case 2
+        if(reduce_temp != 0x7000){
+            if(reduce_temp == temp){
+                way = lane;
+            }
+            way = __reduce_min_sync(mask, way);
+            return way;
+        }   
+
+        //Case 3
+        if(next_reuse == 0xFFFE) temp = static_val;
+        reduce_temp = __reduce_min_sync(mask, temp);
+        if(reduce_temp != 0x7000){
+            if(reduce_temp == temp){
+                way = lane;
+            }
+            way = __reduce_min_sync(mask, way);
+            return way;
+        }
+
+
+        temp = static_val;
+        reduce_temp = __reduce_min_sync(mask, temp);
+        //Case 4
+        if(reduce_temp == temp){
+            way = lane;
+        }
+        way = __reduce_min_sync(mask, way);
+        return way;
+        
+    }
+
+
+    __forceinline__
+    __device__
+    uint32_t
+    hybrid_pvp_evict(uint32_t lane, uint32_t leader, uint32_t mask,  uint64_t set_id){
+
+        //FIX
+        uint32_t th = num_buffers / 8;
+
+        uint64_t next_reuse_full = next_reuse_[set_id * num_ways + lane];
+        unsigned next_reuse = (unsigned) (next_reuse_full >> 48);
+        uint8_t static_val = static_info_[set_id * num_ways + lane];
+        
+        unsigned way = 0xFFFF;
+
+        unsigned  temp = 0x7000;
+        unsigned reduce_temp;
+
+        if(next_reuse != 0xFFFF && next_reuse != 0xFFFE){
+            if(next_reuse > th) temp = static_val;
+            unsigned reduce_temp = __reduce_min_sync(mask, temp);
+            //Case 2
+            if(reduce_temp != 0x7000){
+                if(reduce_temp == temp){
+                    way = lane;
+                }
+                way = __reduce_min_sync(mask, way);
+                return way;
+            }   
+        }
+
+        temp = 0x7000;
+        if(next_reuse == 0xFFFF) temp = static_val;
+          reduce_temp = __reduce_min_sync(mask, temp);
+        //Case 1
+        if(reduce_temp != 0x7000){
+            if(reduce_temp == temp){
+                way = lane;
+            }
+            way = __reduce_min_sync(mask, way);
+            return way;
+        }
+        //Case 3
+        if(next_reuse == 0xFFFE) temp = static_val;
+        reduce_temp = __reduce_min_sync(mask, temp);
+        if(reduce_temp != 0x7000){
+            if(reduce_temp == temp){
+                way = lane;
+            }
+            way = __reduce_min_sync(mask, way);
+            return way;
+        }
+
+
+        temp = static_val;
+        reduce_temp = __reduce_min_sync(mask, temp);
+        //Case 4
+        if(reduce_temp == temp){
+            way = lane;
+        }
+        way = __reduce_min_sync(mask, way);
+        return way;
+        
+    }
+
 
     __forceinline__
     __device__
     uint32_t evict(uint32_t lane, uint32_t leader, uint32_t mask, uint64_t set_id, uint8_t eviction_policy){
         uint32_t evict_way;
         switch(eviction_policy){
-            case RR :
+            //RR
+            case 0 :
                 evict_way = round_robin_evict(lane, leader, mask, set_id);
                 return evict_way;
-            case EP_WINDOW:
-                evict_way = reuse_based_evict(lane, leader, mask, set_id);
+            //Static
+            case 1:
+                evict_way = static_evict(lane, leader, mask, set_id);
                 return evict_way;
+            //Dynamic
+            case 2:
+                if(use_PVP)
+                    evict_way = dynamic_evict(lane, leader, mask, set_id);
+                else
+                    evict_way = dynamic_evict(lane, leader, mask, set_id);
+                return evict_way;
+            //Hybrid
+            case 3:
+                if(use_PVP)
+                    evict_way = hybrid_pvp_evict(lane, leader, mask, set_id);
+                else
+                    evict_way = hybrid_evict(lane, leader, mask, set_id);
+                return evict_way;
+
             default:
                 return 0;
         }
@@ -606,7 +803,107 @@ struct SA_cache_d_t {
     __forceinline__
     __device__
     void 
-    get_data(uint64_t id, T* output_ptr, uint32_t head_ptr, int64_t num_idx = 0){
+    get_data_from_PVP(uint64_t id, T* output_ptr, uint32_t head_ptr, uint64_t b_id, uint8_t* static_info_ptr, uint8_t update_counter, T* prefetched_buf){
+
+        uint32_t lane = lane_id();
+        uint32_t mask = __activemask();
+
+        uint64_t cl_id = id / num_gpus;
+        uint64_t set_id = get_set_id(cl_id);
+        uint64_t set_offset = set_id * num_ways;
+
+        seqlock* cur_set_lock = set_locks_ + set_id;
+        seqlock* cur_cl_seqlock = way_locks_ + set_id * num_ways;
+
+        uint32_t warp_leader = __ffs(mask) - 1;
+
+        //MISS
+        if(lane == warp_leader) {
+            cur_set_lock->write_lock();
+        }
+        __syncwarp(mask);
+
+        //EVICTION
+        uint32_t way;
+        way = evict(lane, warp_leader, mask, set_id, evict_policy);
+
+        if(lane == warp_leader) {
+            (cur_cl_seqlock + way) -> write_busy_lock();
+        }
+        //Check
+        uint64_t old_key =  keys_[set_offset + way];
+        keys_[set_offset + way] = cl_id;
+
+        if(lane == warp_leader) {
+            cur_set_lock->write_unlock();
+        }
+        __syncwarp(mask);
+
+
+        //Premptive Victim-buffer Prefetcher is enabled
+        if (use_PVP){
+            void* cl_src = ((void*)base_addr_)+ (set_offset + way) * CL_SIZE;
+            uint64_t reuse_line = next_reuse_[set_offset + way];
+
+            //GPUID + Batch Index
+            uint64_t evicted_batch_id = (reuse_line & (0x0000FFFFFFFFFFFF));
+            uint64_t evicted_batch_id_test = (reuse_line & (0x000000FFFFFFFFFF));
+
+            uint64_t reuse_val = reuse_line >> 48;
+            uint64_t GPU_id = (reuse_line >> 40) & (0x00FF);
+
+            if(reuse_val != FF_16 && reuse_val != FE_16){
+                if(update_counter == 0){
+                    evict_to_pvp(evicted_batch_id, (uint64_t*) cl_src, CL_SIZE, reuse_val + 1 - update_counter, head_ptr, lane);
+                }
+
+                else if(reuse_val  >= (update_counter-1)){
+                    evict_to_pvp(evicted_batch_id, (uint64_t*) cl_src, CL_SIZE, reuse_val + 1 - update_counter, head_ptr, lane);
+                }
+            }
+        }
+
+        uint32_t queue;
+        //GET from PVP
+      
+        void* cur_dst = ((void*)base_addr_)+ (set_offset + way) * CL_SIZE;
+
+        warp_memcpy<T>(prefetched_buf, cur_dst, CL_SIZE, mask);
+
+
+        __syncwarp(mask);
+
+        if(lane == warp_leader) {
+            (cur_cl_seqlock + way)->write_unbusy();
+        }
+        __syncwarp(mask);
+
+        void* src = ((void*)base_addr_)+ (set_offset + way) * CL_SIZE;
+        warp_memcpy<T>(src, output_ptr, CL_SIZE, mask);
+        if(lane == warp_leader) {
+            miss_cnt.fetch_add(1, simt::memory_order_relaxed);
+            if(use_WB){
+                next_reuse_[set_offset + way] = FE_64;
+            }
+            if(evict_policy == 1 || evict_policy == 3){
+                // STATIC INFO
+                static_info_[set_offset+way] = static_info_ptr[b_id];
+            }
+        }
+        __syncwarp(mask);
+
+        if(lane == warp_leader) {
+            (cur_cl_seqlock + way)->write_busy_unlock();
+        }
+        __syncwarp(mask);
+
+    }
+
+
+    __forceinline__
+    __device__
+    void 
+    get_data(uint64_t id, T* output_ptr, uint32_t head_ptr, uint64_t b_id, uint8_t* static_info_ptr, uint8_t update_counter){
 
         uint32_t lane = lane_id();
         uint32_t mask = __activemask();
@@ -719,9 +1016,10 @@ struct SA_cache_d_t {
             uint64_t reuse_val = reuse_line >> 48;
             uint64_t GPU_id = (reuse_line >> 40) & (0x00FF);
 
-            if(reuse_val != FF_16){
-                //if(evicted_batch_id_test >=8000 )printf("wrong evict: %llu GPU: %llu\n", evicted_batch_id_test, GPU_id);
-                evict_to_pvp(evicted_batch_id, (uint64_t*) cl_src, CL_SIZE, reuse_val, head_ptr, lane);
+            if(reuse_val != FF_16 && reuse_val != FE_16){
+                if(reuse_val >= (update_counter-1)){
+                    evict_to_pvp(evicted_batch_id, (uint64_t*) cl_src, CL_SIZE, reuse_val + 1 - update_counter, head_ptr, lane);
+                }
                 //victim_buffer.evict_to_pvp(evicted_batch_id, (uint64_t*) cl_src, CL_SIZE, reuse_val, head_ptr, lane);
                 //if(threadIdx.x % 32 == 0) printf("GPU: %llu evict to pvp KEY:%llu batch_id:%llu my GPU id:%u reuse_val:%llu GPU_id:%llu num_idx:%llu \n",(unsigned long long) GPU_id, (unsigned long long)old_key, (unsigned long long)evicted_batch_id_test, (unsigned) my_GPU_id_, (unsigned long long)reuse_val,(unsigned long long) GPU_id, (unsigned long long)num_idx);
             }
@@ -745,7 +1043,11 @@ struct SA_cache_d_t {
         if(lane == warp_leader) {
             miss_cnt.fetch_add(1, simt::memory_order_relaxed);
             if(use_WB){
-                next_reuse_[set_offset + way] = FF_64;
+                next_reuse_[set_offset + way] = FE_64;
+            }
+            if(evict_policy == 1 || evict_policy == 3){
+                // STATIC INFO
+                static_info_[set_offset+way] = static_info_ptr[b_id];
             }
         }
         __syncwarp(mask);
@@ -872,14 +1174,18 @@ struct GIDS_SA_handle{
 
     uint64_t total_evicted_cl = 0;
 
+
+    Eviction_Policy cache_ep;
+    uint8_t* static_info_;
+
     __host__
-    void flush_next_reuse(){
-        cudaMemset(next_reuse_, 0xFF, (uint64_t) sizeof(uint64_t) * num_sets_ * num_ways_);
+    void flush_next_reuse( cudaStream_t flush_stream){
+        cudaMemsetAsync(next_reuse_, 0xFF, (uint64_t) sizeof(uint64_t) * num_sets_ * num_ways_, flush_stream);
     }
 
     __host__ 
     GIDS_SA_handle(uint64_t num_sets, uint64_t num_ways, uint64_t cl_size, const Controller& ctrl, const std::vector<Controller*>& ctrls,  const uint32_t cudaDevice,
-                    bool use_WB_flag, bool use_PVP_flag, unsigned int my_GPU_id, unsigned n_gpus, uint32_t n_buffer = 1, uint32_t b_depth = 1) :
+                    bool use_WB_flag, bool use_PVP_flag, unsigned int my_GPU_id, unsigned n_gpus, uint8_t eviction_p, uint32_t n_buffer = 1, uint32_t b_depth = 1) :
     num_sets_(num_sets),
     num_ways_(num_ways),
     CL_SIZE_(cl_size),
@@ -890,6 +1196,7 @@ struct GIDS_SA_handle{
     my_GPU_id_(my_GPU_id),
     num_gpus(n_gpus)
     {
+       
         uint64_t* prp1;
         uint64_t* prp2;
 
@@ -926,6 +1233,11 @@ struct GIDS_SA_handle{
             cudaHostGetDevicePointer((uint64_t **)&device_data_array, (uint64_t *)host_data_array, 0);
 
            // victim_buffer.init(num_buffers, buffer_depth, queue_counters, device_index_array, device_data_array);
+        }
+
+        if(eviction_p == 1 || eviction_p == 3){
+            cudaMalloc((void**)&static_info_, (uint64_t) sizeof(uint8_t) * num_sets_ * num_ways_);
+            cudaMemset(static_info_, 0x0, (uint64_t) sizeof(uint8_t) * num_sets_ * num_ways_);
         }
 
         uint64_t cache_size = CL_SIZE_ * num_sets_ * num_ways_;
@@ -989,7 +1301,8 @@ struct GIDS_SA_handle{
         next_reuse_, use_WB, use_PVP, 
         //victim_buffer,           
         num_buffers,  buffer_depth,  queue_counters, device_index_array,  device_data_array,
-        my_GPU_id_, num_gpus);
+        my_GPU_id_, num_gpus,
+        eviction_p, static_info_);
 
         //std::cout << "Cache host: " << cache_host.victim_buffer.buffer_depth;
 

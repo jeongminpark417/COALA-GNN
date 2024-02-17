@@ -69,7 +69,7 @@ def track_acc_Multi_GIDS(rank, world_size, g, args, label_array=None):
         cache_dim = args.cache_dim,
         set_associative_cache=True,
         num_ways=32,
-        ssd_list = [rank],
+        ssd_list = [rank, rank+world_size],
         device_id = rank,
         rank = rank, 
         world_size = world_size,
@@ -78,8 +78,11 @@ def track_acc_Multi_GIDS(rank, world_size, g, args, label_array=None):
         batch_size = args.batch_size,
         use_WB = args.window_buffer,
         use_PVP = args.use_PVP,
-        pvp_depth = (128*1024),
-        debug_mode = False
+        pvp_depth = (16*1024),
+        debug_mode = False,
+        static_info_file = args.static_info_file,
+        eviction_policy = args.eviction_policy,
+        refresh_time = args.refresh_time
     
     )
     dim = args.emb_size
@@ -174,8 +177,8 @@ def track_acc_Multi_GIDS(rank, world_size, g, args, label_array=None):
     model = DDP(model,  device_ids=[rank])
   #  model = DDP(model,  device_ids=[rank], find_unused_parameters=True)
 
-    warm_up_iter = 20
-    test_iter = 20
+    warm_up_iter = 100
+    test_iter = 100
     # Setup is Done
     for epoch in tqdm.tqdm(range(args.epochs)):
         epoch_start = time.time()
@@ -198,6 +201,8 @@ def track_acc_Multi_GIDS(rank, world_size, g, args, label_array=None):
             #     break
             if(step == warm_up_iter):
                 print("warp up done")
+                e2e_time += time.time() - e2e_time_start 
+
                 train_dataloader.print_stats()
                 train_dataloader.print_timer()
                 print_times(transfer_time, train_time, e2e_time)
@@ -249,7 +254,7 @@ def track_acc_Multi_GIDS(rank, world_size, g, args, label_array=None):
         epoch_time = time.time() - epoch_time_start
         print("epoch time: ", epoch_time)
         epoch_time = 0.0
-        train_dataloader.print_stats()
+        # train_dataloader.print_stats()
 
        
   
@@ -317,7 +322,7 @@ if __name__ == '__main__':
     parser.add_argument('--decay', type=float, default=0.001)
     parser.add_argument('--epochs', type=int, default=3)
     parser.add_argument('--num_layers', type=int, default=6)
-    parser.add_argument('--num_heads', type=int, default=8)
+    parser.add_argument('--num_heads', type=int, default=4)
     parser.add_argument('--log_every', type=int, default=2)
 
     #GIDS parameter
@@ -326,7 +331,7 @@ if __name__ == '__main__':
     parser.add_argument('--cache_size', type=int, default=8)
     parser.add_argument('--uva', type=int, default=0)
     parser.add_argument('--uva_graph', type=int, default=0)
-    parser.add_argument('--wb_size', type=int, default=6)
+    parser.add_argument('--wb_size', type=int, default=4)
 
     parser.add_argument('--device', type=int, default=0)
 
@@ -354,6 +359,16 @@ if __name__ == '__main__':
     parser.add_argument('--offset', type=int, default=0, help='Offset for the feature data stored in the SSD') 
     parser.add_argument('--num_ele', type=int, default=100, help='Number of elements in the dataset (Total Size / sizeof(Type)') 
     parser.add_argument('--cache_dim', type=int, default=1024) #CHECK
+
+    parser.add_argument('--eviction_policy', type=str, default='round_robin',
+                        choices=['round_robin', 'static', 'dynamic','hybrid'])
+
+    parser.add_argument('--static_info_file', type=str, default='/mnt/raid0/norm_pr_full_8bit.pt', 
+        help='path for the static information file')
+
+    parser.add_argument('--refresh_time', type=int, default=1)
+
+
 
 
     args = parser.parse_args()

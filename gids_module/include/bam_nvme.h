@@ -118,10 +118,21 @@ struct BAM_Feature_Store {
   uint64_t** node_flag_buffer_array ;
   uint64_t max_sample_size;
 
+
+  uint8_t update_counter = 0;
+  uint8_t refresh_time = 1;
+
+
   //Debugging 
   bool debug_mode = false;
   unsigned long long * evict_counter;
   unsigned long long* prefetch_counter;
+
+  //Eviciton Policy
+  uint8_t eviction_policy;
+  //Pinned memory pointer in host/device
+  uint8_t* h_static_val_array;
+  uint8_t* d_static_val_array;
 
 
   int low_priority;
@@ -138,8 +149,7 @@ struct BAM_Feature_Store {
 
   void init_controllers(GIDS_Controllers GIDS_ctrl, uint32_t ps, uint64_t r_off, uint64_t num_ele, uint64_t cache_size, 
                         uint64_t num_ssd);
-  void init_set_associative_cache(GIDS_Controllers GIDS_ctrl, uint32_t ps, uint64_t r_off, uint64_t cache_size, uint32_t num_gpus,  uint64_t num_ele, 
-                        uint64_t num_ssd, uint64_t num_ways, bool use_WB, bool use_PVP, uint32_t window_buffer_size, uint32_t pvp_depth_size, uint64_t max_samples, int debug);
+  void init_set_associative_cache(GIDS_Controllers , uint32_t , uint64_t , uint64_t , uint32_t ,  uint64_t , uint64_t , uint64_t , bool , bool , uint32_t , uint32_t , uint64_t , uint8_t, int , int );
 
   
 
@@ -149,9 +159,9 @@ struct BAM_Feature_Store {
   void read_feature_merged_hetero(int num_iter, const std::vector<uint64_t>&  i_ptr_list, const std::vector<uint64_t>& i_index_ptr_list, const std::vector<uint64_t>&   num_index, int dim, int cache_dim, const std::vector<uint64_t>& key_off);
 
 
-  void SA_read_feature(uint64_t tensor_ptr, uint64_t index_ptr,int64_t num_index, int dim, int cache_dim, uint64_t key_off);
+  void SA_read_feature(uint64_t tensor_ptr, uint64_t index_ptr,int64_t num_index, int dim, int cache_dim, uint64_t key_off, uint64_t staic_info_ptr);
   
-  void SA_read_feature_dist( const std::vector<uint64_t>&  i_return_ptr_list, const std::vector<uint64_t>&  i_index_ptr_list, const std::vector<uint64_t>&  index_size_list, int num_gpu, int dim, int cache_dim, uint64_t key_off);
+  void SA_read_feature_dist( const std::vector<uint64_t>&  i_return_ptr_list, const std::vector<uint64_t>&  i_index_ptr_list, const std::vector<uint64_t>&  index_size_list, int num_gpu, int dim, int cache_dim, uint64_t key_off, const std::vector<uint64_t>&  i_static_info_ptr_list);
   void cpu_backing_buffer(uint64_t dim, uint64_t len);
   void set_cpu_buffer(uint64_t idx_buffer, int num);  
 
@@ -186,6 +196,12 @@ struct BAM_Feature_Store {
   void print_victim_buffer_data(uint64_t offset, uint64_t len);
 
   void update_reuse_counters(uint64_t batch_array_idx, uint64_t batch_size_idx, uint32_t max_batch_size, int num_gpus, int num_buffers);
+
+  //Eviciton Poliyc
+  void get_static_info(uint64_t i_out, uint64_t i_index_ptr, uint64_t index_len);
+  void get_static_info_dist(const std::vector<uint64_t>&  i_out, const std::vector<uint64_t>&  i_index_ptr, const std::vector<uint64_t>&  index_len_array);
+  void create_static_info_buffer(const std::string& path);
+
 };
 
 

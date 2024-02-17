@@ -29,7 +29,7 @@ __global__ void read_feature_kernel(array_d_t<T> *dr, T *out_tensor_ptr,
 template <typename T = float>
 __global__ void SA_read_feature_kernel(SA_cache_d_t<T> *cache, T *out_tensor_ptr,
                                     int64_t *index_ptr, int dim,
-                                    int64_t num_idx, int cache_dim, uint64_t key_off, uint32_t head_ptr) {
+                                    int64_t num_idx, int cache_dim, uint64_t key_off, uint32_t head_ptr, uint8_t* static_info_ptr, uint8_t update_counter) {
 
   uint64_t bid = blockIdx.x;
   int num_warps = blockDim.x / 32;
@@ -39,14 +39,14 @@ __global__ void SA_read_feature_kernel(SA_cache_d_t<T> *cache, T *out_tensor_ptr
     uint64_t row_index = index_ptr[idx_idx] + key_off;
     uint64_t tid = threadIdx.x % 32;
 
-    cache->get_data(row_index, out_tensor_ptr + (bid * num_warps + warp_id) * dim, head_ptr);
+    cache->get_data(row_index, out_tensor_ptr + (bid * num_warps + warp_id) * dim, head_ptr, idx_idx, static_info_ptr, update_counter);
   } 
 }
 
 template <typename T = float>
 __global__ void SA_read_feature_kernel_with_PVP(SA_cache_d_t<T> *cache, T *out_tensor_ptr,
                                     int64_t *index_ptr, uint64_t** node_flag_ptr, T* PVP_pinned_data,  int dim,
-                                    int64_t num_idx, int cache_dim, int cur_gpu, uint64_t key_off, uint32_t head_ptr, bool debug_mode, unsigned long long* debug_count = nullptr) {
+                                    int64_t num_idx, int cache_dim, int cur_gpu, uint64_t key_off, uint32_t head_ptr, uint8_t* static_info_ptr, uint8_t update_counter, bool debug_mode, unsigned long long* debug_count = nullptr) {
 
   uint64_t bid = blockIdx.x;
   int num_warps = blockDim.x / 32;
@@ -68,14 +68,17 @@ __global__ void SA_read_feature_kernel_with_PVP(SA_cache_d_t<T> *cache, T *out_t
         if(tid == 0) atomicAdd(debug_count, 1);
 
       }
-      for(; tid < dim; tid += 32){
-        uint64_t prefetched_idx = fetch_idx & (0x7FFFFFFFFFFFFFFF);
-        out_tensor_ptr[(bid * num_warps + warp_id) * dim + tid] = PVP_pinned_data[dim * fetch_idx + tid];
-      }
+      // for(; tid < dim; tid += 32){
+      //   uint64_t prefetched_idx = fetch_idx & (0x7FFFFFFFFFFFFFFF);
+      //   out_tensor_ptr[(bid * num_warps + warp_id) * dim + tid] = PVP_pinned_data[dim * fetch_idx + tid];
+      // }
+      T* PVP_data_ptr = PVP_pinned_data + dim * fetch_idx;
+      cache->get_data_from_PVP(row_index, out_tensor_ptr + (bid * num_warps + warp_id) * dim, head_ptr,idx_idx, static_info_ptr, update_counter, PVP_data_ptr);
+
     }
 
     else{
-      cache->get_data(row_index, out_tensor_ptr + (bid * num_warps + warp_id) * dim, head_ptr, num_idx);
+      cache->get_data(row_index, out_tensor_ptr + (bid * num_warps + warp_id) * dim, head_ptr,idx_idx, static_info_ptr, update_counter);
     }
   }
   
@@ -250,7 +253,10 @@ gather_feature_kernel(T *out_tensor_ptr, T* src_tensor_ptr, uint64_t* meta_buffe
     // if(dst_idx == 1 && threadIdx.x == 0) {
     //   printf("my rank: %i src rank:%i r_idx:%llu src data 1: %f 2: %f\n", rank, my_rank, (unsigned long long) r_idx, (float) ((src_tensor_ptr + r_idx * dim)[0]),  (float) ((src_tensor_ptr + r_idx * dim)[1]));
     // }
-    block_memcpy<T>((void*) (out_tensor_ptr + dst_idx * dim), (void*)(src_tensor_ptr + r_idx * dim), dim * sizeof(T) / sizeof(T) );
+    
+    //block_memcpy<T>((void*) (out_tensor_ptr + dst_idx * dim), (void*)(src_tensor_ptr + r_idx * dim), dim * sizeof(T) / sizeof(T) );
+    block_memcpy<uint64_t>((void*) (out_tensor_ptr + dst_idx * dim), (void*)(src_tensor_ptr + r_idx * dim), dim * sizeof(uint64_t) / sizeof(uint64_t) );
+
   }
 
 
@@ -334,6 +340,20 @@ void fill_batch_kernel(uint64_t* PVP_pinned_idx, uint64_t** node_flag_ptr, uint3
 
   else{
 
+  }
+
+}
+
+
+
+__global__
+void
+get_static_info_kernel(uint8_t* out_ptr, uint64_t* index_ptr, uint64_t index_len, uint8_t* static_val_array ){
+  uint64_t id = blockIdx.x * blockDim.x + threadIdx.x;
+  if(id < index_len){
+    uint64_t node_id  = index_ptr[id];
+    uint8_t static_val = static_val_array[node_id];
+    out_ptr[id] = static_val;
   }
 
 }
