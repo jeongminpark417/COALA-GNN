@@ -587,7 +587,7 @@ const std::vector<uint64_t>&  index_size_list, int num_gpu, int dim, int cache_d
 
       //printf("index size: %llu\n", index_size);
 
-      uint64_t b_size = 32;
+      uint64_t b_size = 128;
       uint64_t n_warp = b_size / 32;
       uint64_t g_size = (index_size+n_warp - 1) / n_warp;
     //auto t1 = Clock::now();
@@ -605,9 +605,10 @@ const std::vector<uint64_t>&  index_size_list, int num_gpu, int dim, int cache_d
       total_access += index_size;
   }
 
+  cuda_err_chk(cudaDeviceSynchronize());
   for (int i = 0; i < num_gpu; i++) {
-    cuda_err_chk(cudaStreamSynchronize(streams[i]));
-  }  
+      cudaStreamDestroy(streams[i]);
+  }
 
   auto t2 = Clock::now();
   auto us = std::chrono::duration_cast<std::chrono::microseconds>(
@@ -653,7 +654,7 @@ void BAM_Feature_Store<TYPE>::gather_feature_list(uint64_t i_return_ptr, const s
 
     uint64_t* d_meta_buffer_ptr =  (uint64_t* ) (i_meta_buffer[i]);
 
-    uint64_t b_size = 512;
+    uint64_t b_size = 256;
     //uint64_t n_warp = b_size / 32;
     //uint64_t g_size = (index_size+n_warp - 1) / n_warp;
     uint64_t g_size = index_size;
@@ -663,7 +664,20 @@ void BAM_Feature_Store<TYPE>::gather_feature_list(uint64_t i_return_ptr, const s
   }
 
   cuda_err_chk(cudaDeviceSynchronize());
-  auto t2 = Clock::now();
+  for (int i = 0; i < num_gpu; i++) {
+      cudaStreamDestroy(streams[i]);
+  }
+  
+  // auto t2 = Clock::now();
+
+  //   auto us = std::chrono::duration_cast<std::chrono::microseconds>(
+  //     t2 - t1); // Microsecond (as int)
+  // auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+  //     t2 - t1); // Microsecond (as int)
+  // const float ms_fractional =
+  //     static_cast<float>(us.count()) / 1000; // Milliseconds (as float)
+
+  // printf("gather kernel time: %f\n", ms_fractional);
 
 
 }

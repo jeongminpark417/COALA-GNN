@@ -839,6 +839,7 @@ struct SA_cache_d_t {
         }
         __syncwarp(mask);
 
+        if(lane == warp_leader) hit_cnt.fetch_add(1, simt::memory_order_relaxed);
 
         //Premptive Victim-buffer Prefetcher is enabled
         if (use_PVP){
@@ -853,12 +854,16 @@ struct SA_cache_d_t {
             uint64_t GPU_id = (reuse_line >> 40) & (0x00FF);
 
             if(reuse_val != FF_16 && reuse_val != FE_16){
-                if(update_counter == 0){
-                    evict_to_pvp(evicted_batch_id, (uint64_t*) cl_src, CL_SIZE, reuse_val + 1 - update_counter, head_ptr, lane);
-                }
+                // if(update_counter == 0){
+                //     //evict_to_pvp(evicted_batch_id, (uint64_t*) cl_src, CL_SIZE, reuse_val + 1 - update_counter, head_ptr, lane);
 
-                else if(reuse_val  >= (update_counter-1)){
-                    evict_to_pvp(evicted_batch_id, (uint64_t*) cl_src, CL_SIZE, reuse_val + 1 - update_counter, head_ptr, lane);
+                //     evict_to_pvp(evicted_batch_id, (uint64_t*) cl_src, CL_SIZE, reuse_val - update_counter, head_ptr, lane);
+                // }
+
+                if(reuse_val  >= (update_counter)){
+                    //evict_to_pvp(evicted_batch_id, (uint64_t*) cl_src, CL_SIZE, reuse_val + 1 - update_counter, head_ptr, lane);
+
+                    evict_to_pvp(evicted_batch_id, (uint64_t*) cl_src, CL_SIZE, reuse_val - update_counter, head_ptr, lane);
                 }
             }
         }
@@ -881,7 +886,7 @@ struct SA_cache_d_t {
         void* src = ((void*)base_addr_)+ (set_offset + way) * CL_SIZE;
         warp_memcpy<T>(src, output_ptr, CL_SIZE, mask);
         if(lane == warp_leader) {
-            miss_cnt.fetch_add(1, simt::memory_order_relaxed);
+            //miss_cnt.fetch_add(1, simt::memory_order_relaxed);
             if(use_WB){
                 next_reuse_[set_offset + way] = FE_64;
             }
@@ -896,6 +901,7 @@ struct SA_cache_d_t {
             (cur_cl_seqlock + way)->write_busy_unlock();
         }
         __syncwarp(mask);
+
 
     }
 
@@ -1017,8 +1023,8 @@ struct SA_cache_d_t {
             uint64_t GPU_id = (reuse_line >> 40) & (0x00FF);
 
             if(reuse_val != FF_16 && reuse_val != FE_16){
-                if(reuse_val >= (update_counter-1)){
-                    evict_to_pvp(evicted_batch_id, (uint64_t*) cl_src, CL_SIZE, reuse_val + 1 - update_counter, head_ptr, lane);
+                if(reuse_val >= (update_counter)){
+                    evict_to_pvp(evicted_batch_id, (uint64_t*) cl_src, CL_SIZE, reuse_val - update_counter, head_ptr, lane);
                 }
                 //victim_buffer.evict_to_pvp(evicted_batch_id, (uint64_t*) cl_src, CL_SIZE, reuse_val, head_ptr, lane);
                 //if(threadIdx.x % 32 == 0) printf("GPU: %llu evict to pvp KEY:%llu batch_id:%llu my GPU id:%u reuse_val:%llu GPU_id:%llu num_idx:%llu \n",(unsigned long long) GPU_id, (unsigned long long)old_key, (unsigned long long)evicted_batch_id_test, (unsigned) my_GPU_id_, (unsigned long long)reuse_val,(unsigned long long) GPU_id, (unsigned long long)num_idx);

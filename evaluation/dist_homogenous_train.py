@@ -56,6 +56,10 @@ def track_acc_Multi_GIDS(rank, world_size, g, args, label_array=None):
     device = torch.device('cuda:{:d}'.format(rank))
     torch.cuda.set_device(device)
 
+    ssd_list = [0,1]
+    if (rank == 0):
+        ssd_list = [2,3]
+
     GIDS_Loader = None
     GIDS_Loader = GIDS.GIDS(
         page_size = args.page_size,
@@ -69,7 +73,7 @@ def track_acc_Multi_GIDS(rank, world_size, g, args, label_array=None):
         cache_dim = args.cache_dim,
         set_associative_cache=True,
         num_ways=32,
-        ssd_list = [rank, rank+world_size],
+        ssd_list = [rank*world_size, rank*world_size+1],
         device_id = rank,
         rank = rank, 
         world_size = world_size,
@@ -78,7 +82,7 @@ def track_acc_Multi_GIDS(rank, world_size, g, args, label_array=None):
         batch_size = args.batch_size,
         use_WB = args.window_buffer,
         use_PVP = args.use_PVP,
-        pvp_depth = (16*1024),
+        pvp_depth = (32*1024),
         debug_mode = False,
         static_info_file = args.static_info_file,
         eviction_policy = args.eviction_policy,
@@ -177,7 +181,7 @@ def track_acc_Multi_GIDS(rank, world_size, g, args, label_array=None):
     model = DDP(model,  device_ids=[rank])
   #  model = DDP(model,  device_ids=[rank], find_unused_parameters=True)
 
-    warm_up_iter = 100
+    warm_up_iter = 300
     test_iter = 100
     # Setup is Done
     for epoch in tqdm.tqdm(range(args.epochs)):

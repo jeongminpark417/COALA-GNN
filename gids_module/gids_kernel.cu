@@ -64,10 +64,7 @@ __global__ void SA_read_feature_kernel_with_PVP(SA_cache_d_t<T> *cache, T *out_t
     //already prefetched
    if((fetch_idx >> 63) == (uint64_t) 1){
       //if(tid == 0) printf("prefetched KEY:%llu my GPU ID:%llu write GPU:%i IDX:%llu num_idx:%llu \n", row_index, (unsigned long long) (cache -> my_GPU_id_), cur_gpu,  (unsigned long long) idx_idx,(unsigned long long) num_idx);
-      if(debug_mode) {
-        if(tid == 0) atomicAdd(debug_count, 1);
 
-      }
       // for(; tid < dim; tid += 32){
       //   uint64_t prefetched_idx = fetch_idx & (0x7FFFFFFFFFFFFFFF);
       //   out_tensor_ptr[(bid * num_warps + warp_id) * dim + tid] = PVP_pinned_data[dim * fetch_idx + tid];
@@ -255,7 +252,7 @@ gather_feature_kernel(T *out_tensor_ptr, T* src_tensor_ptr, uint64_t* meta_buffe
     // }
     
     //block_memcpy<T>((void*) (out_tensor_ptr + dst_idx * dim), (void*)(src_tensor_ptr + r_idx * dim), dim * sizeof(T) / sizeof(T) );
-    block_memcpy<uint64_t>((void*) (out_tensor_ptr + dst_idx * dim), (void*)(src_tensor_ptr + r_idx * dim), dim * sizeof(uint64_t) / sizeof(uint64_t) );
+    block_memcpy<ulonglong4>((void*) (out_tensor_ptr + dst_idx * dim), (void*)(src_tensor_ptr + r_idx * dim), dim * sizeof(T) / sizeof(ulonglong4) );
 
   }
 

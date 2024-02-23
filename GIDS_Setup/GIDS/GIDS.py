@@ -1013,7 +1013,9 @@ class GIDS():
             self.BAM_FS.SA_read_feature_dist(gathered_torch_ptr_list, index_ptr_list, gathered_index_size_list, self.world_size, dim, self.cache_dim, 0, staic_info_ten_ptr_list)
             
         self.agg_time += time.time() - feature_read_start
-        
+        #Barrier
+        torch.distributed.barrier()
+
         # Gathering Minibatch Tensors
         self.gather_tensors(orig_tensor_list, gathered_tensor_list)
 
@@ -1106,9 +1108,73 @@ class GIDS():
             self.BAM_FS.reset_node_counter(self.cpu_index_len_tensor_ptr_list, self.world_size)
             self.Reset_time += (time.time()) - reset_start
 
-            self.GIDS_time += time.time() - GIDS_time_start
-            #batch.append(return_torch)
+            self.GIDS_time += time.time() - GIDS_time_start        
+        batch2 = (*batch, return_torch) 
+
+        return batch2
+
+
+    def dist_SA_fetch_feature_fast_gather(self, dim, it, device):
+        GIDS_time_start = time.time()
+
+        self.distribute_index(dim, it, device)
+
+        batch = self.wb_batch_buffer.pop(0)
+        orig_index_size_list = self.wb_orig_index_size_list.pop(0)
+        gathered_index_size_list = self.wb_gathered_index_size_list.pop(0)
+        gathered_index_list = self.wb_gathered_index_list.pop(0)
+        meta_data_list = self.wb_meta_data_list.pop(0)
+        index_size = len(batch[0]) 
+
+        # print("GPU: ",self.rank, "batch: ", batch)
+        #batch_SI = self.get_static_info(batch)
+        # print("GPU: ", self.rank," batch SI: ", batch_SI)
+
+        # Feature Aggregation
+        orig_tensor_list = []
+        gathered_tensor_list = []
+        self.alloc_tensors(dim, orig_index_size_list, orig_tensor_list, gathered_index_size_list, gathered_tensor_list)
+
+        feature_read_start = time.time()
+        index_ptr_list = self.create_ptr_list(gathered_index_list)
+        gathered_torch_ptr_list = self.create_ptr_list(gathered_tensor_list)
         
+        torch.cuda.synchronize()
+        
+        return_torch2 =  torch.zeros([index_size,dim], dtype=torch.float, device=self.gids_device).contiguous()
+
+
+        static_info_ten_list = []
+        staic_info_ten_ptr_list = []
+        if(self.eviction_policy == 1 or self.eviction_policy == 3):
+            static_info_ten_list, staic_info_ten_ptr_list = self.get_static_info_dist(index_ptr_list, gathered_index_size_list)
+
+        with nvtx.annotate("Feature Aggregation", color="blue"):
+            self.BAM_FS.SA_read_feature_dist(gathered_torch_ptr_list, index_ptr_list, gathered_index_size_list, self.world_size, dim, self.cache_dim, 0, staic_info_ten_ptr_list)
+    
+
+        self.agg_time += time.time() - feature_read_start
+
+        # Gathering Minibatch Tensors
+        self.gather_tensors(orig_tensor_list, gathered_tensor_list)
+
+
+        # GPU to GPU memcpy
+        with nvtx.annotate("GPU to GPU Memcpy", color="green"):
+
+            gather_start = time.time()
+            return_torch =  torch.zeros([index_size,dim], dtype=torch.float, device=self.gids_device).contiguous()
+
+            dist_gather_ptr_list = self.create_ptr_list(orig_tensor_list)
+            meta_ptr_list = self.create_ptr_list(meta_data_list)
+            self.BAM_FS.gather_feature_list(return_torch.data_ptr(),dist_gather_ptr_list, orig_index_size_list, self.world_size, dim,  self.rank, meta_ptr_list)
+            self.Gather_time += (time.time()) - gather_start
+
+            reset_start = time.time()
+            self.BAM_FS.reset_node_counter(self.cpu_index_len_tensor_ptr_list, self.world_size)
+            self.Reset_time += (time.time()) - reset_start
+
+            self.GIDS_time += time.time() - GIDS_time_start        
         batch2 = (*batch, return_torch) 
 
         return batch2
