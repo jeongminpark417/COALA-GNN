@@ -216,10 +216,30 @@ split_node_list_kernel(int64_t* index_ptr, uint64_t* dist_index_ptr,  uint64_t* 
     uint64_t* meta_buffer = (uint64_t*) (meta_buffer_ptr[gpu_id]);
     meta_buffer[enq_idx] = idx;
     dist_index[enq_idx] = cur_node;
+  }
+}
+
+
+template <typename T = float>
+__global__ void 
+split_node_list_hetero_kernel(int64_t* index_ptr, uint64_t* dist_index_ptr,  uint64_t* index_pointer_list,  int64_t num_gpu, int64_t index_size, 
+    uint64_t* meta_buffer_ptr, uint64_t feat_iter){
+  
+  uint64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+
+  if(idx < index_size){
+    int64_t cur_node = index_ptr[idx];
+    int64_t gpu_id = cur_node % num_gpu;
+    unsigned long long int enq_idx = atomicAdd((unsigned long long int*) (index_pointer_list[gpu_id]), (unsigned long long int)1);
+
+    int64_t* dist_index = (int64_t*) (dist_index_ptr[gpu_id]);
+    uint64_t* meta_buffer = (uint64_t*) (meta_buffer_ptr[gpu_id]);
+    meta_buffer[enq_idx] = (idx | (feat_iter << 56));
+    dist_index[enq_idx] = cur_node;
 
   }
-
 }
+
 
 
 template <typename T = float>
@@ -255,9 +275,23 @@ gather_feature_kernel(T *out_tensor_ptr, T* src_tensor_ptr, uint64_t* meta_buffe
     block_memcpy<ulonglong4>((void*) (out_tensor_ptr + dst_idx * dim), (void*)(src_tensor_ptr + r_idx * dim), dim * sizeof(T) / sizeof(ulonglong4) );
 
   }
-
-
 }
+
+
+template <typename T = float>
+__global__ 
+void 
+gather_feature_hetero_kernel(T **out_tensor_ptr, T* src_tensor_ptr, uint64_t* meta_buffer, int dim, int64_t num_idx, int rank, int my_rank){
+
+  uint64_t r_idx = blockIdx.x;
+  if(r_idx < num_idx){
+    uint64_t dst_idx = meta_buffer[r_idx];
+    uint64_t feat_id = dst_idx >> 56;
+    dst_idx = (dst_idx) & (0x00FFFFFFFFFFFFFF);
+    block_memcpy<ulonglong4>((void*) (out_tensor_ptr[feat_id] + dst_idx * dim), (void*)(src_tensor_ptr + r_idx * dim), dim * sizeof(T) / sizeof(ulonglong4) );
+  }
+}
+
 
 template <typename T = float>
 __global__ 

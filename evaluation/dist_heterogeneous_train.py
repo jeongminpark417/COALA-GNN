@@ -5,6 +5,9 @@ import torch, torch.nn as nn, torch.optim as optim
 import time, tqdm, numpy as np
 from models import *
 from GIDS_dataloader import IGB260MDGLDataset, OGBDGLDataset, SharedIGB260MDGLDataset
+from GIDS_dataloader import IGBHeteroDGLDataset, IGBHeteroDGLDatasetShared, IGBHeteroDGLDatasetMassive, OGBHeteroDGLDatasetMassive, OGBHeteroDGLDatasetMassiveShared
+
+
 import csv 
 import warnings
 
@@ -47,7 +50,7 @@ def print_times(transfer_time, train_time, e2e_time):
     print("train time: ", train_time)
     print("e2e time: ", e2e_time)
 
-def track_acc_Multi_GIDS(rank, world_size, g, args, label_array=None):
+def track_acc_Multi_GIDS(rank, world_size, g, args, label_array, hetero_map):
     print("Rank: ", rank, " GNN trainign starts")
 
     init_process_group(world_size, rank)
@@ -86,7 +89,9 @@ def track_acc_Multi_GIDS(rank, world_size, g, args, label_array=None):
         debug_mode = False,
         static_info_file = args.static_info_file,
         eviction_policy = args.eviction_policy,
-        refresh_time = args.refresh_time
+        refresh_time = args.refresh_time,
+        heterogeneous = True,
+        hetero_map = hetero_map
     
     )
     dim = args.emb_size
@@ -103,24 +108,29 @@ def track_acc_Multi_GIDS(rank, world_size, g, args, label_array=None):
         GIDS_Loader.set_cpu_buffer(pr_ten, num_pinned_nodes)
 
 
-    sampler = dgl.dataloading.MultiLayerNeighborSampler(
-               [int(fanout) for fanout in args.fan_out.split(',')]
-               )
+    # sampler = dgl.dataloading.MultiLayerNeighborSampler(
+    #            [int(fanout) for fanout in args.fan_out.split(',')]
+    #            )
+    sampler = dgl.dataloading.NeighborSampler([int(fanout) for fanout in args.fan_out.split(',')])
 
     # g.ndata['features'] = g.ndata['feat']
     #g.ndata['labels'] = g.ndata['label']
 
-    train_nid = torch.nonzero(g.ndata['train_mask'], as_tuple=True)[0]
-    val_nid = torch.nonzero(g.ndata['val_mask'], as_tuple=True)[0]
-    test_nid = torch.nonzero(g.ndata['test_mask'], as_tuple=True)[0]
-    #in_feats = g.ndata['features'].shape[1]
+    category = g.predict
+
+
+    train_nid = torch.nonzero(g.nodes[category].data['train_mask'], as_tuple=True)[0]
+    val_nid = torch.nonzero(g.nodes[category].data['val_mask'], as_tuple=True)[0]
+    test_nid = torch.nonzero(g.nodes[category].data['test_mask'], as_tuple=True)[0]
+    
+
     in_feats = dim
     print("in feats: ", in_feats)
 
 
     train_dataloader = GIDS_DGLDataLoader(
         g,
-        train_nid,
+        {category: train_nid},
         sampler,
         args.batch_size,
         dim,
@@ -162,17 +172,18 @@ def track_acc_Multi_GIDS(rank, world_size, g, args, label_array=None):
     #     )
 
 
-    if args.model_type == 'gcn':
-        model = GCN(in_feats, args.hidden_channels, args.num_classes, 
-            args.num_layers).to(device)
-    if args.model_type == 'sage':
-        model = SAGE(in_feats, args.hidden_channels, args.num_classes, 
-            args.num_layers).to(device)
-    if args.model_type == 'gat':
-        model = GAT(in_feats, args.hidden_channels, args.num_classes, 
-            args.num_layers, args.num_heads).to(device)
+  
 
-    model = DDP(model,  device_ids=[rank])
+    if args.model_type == 'rgcn':
+        model = RGCN(g.etypes, in_feats, args.hidden_channels,
+            args.num_classes, args.num_layers).to(device)
+    if args.model_type == 'rsage':
+        model = RSAGE(g.etypes, in_feats, args.hidden_channels,
+            args.num_classes, args.num_layers).to(device)
+    if args.model_type == 'rgat':
+        model = RGAT(g.etypes, in_feats, args.hidden_channels,
+            args.num_classes, args.num_layers, args.num_heads).to(device)
+
 
 
     loss_fcn = nn.CrossEntropyLoss().to(device)
@@ -181,9 +192,10 @@ def track_acc_Multi_GIDS(rank, world_size, g, args, label_array=None):
         lr=args.learning_rate, weight_decay=args.decay
         )
 
-  #  model = DDP(model,  device_ids=[rank], find_unused_parameters=True)
+  #  model = DDP(model,  device_ids=[rank])
+    model = DDP(model,  device_ids=[rank], find_unused_parameters=True)
 
-    warm_up_iter = 100
+    warm_up_iter = 300
     test_iter = 100
     # Setup is Done
     for epoch in tqdm.tqdm(range(args.epochs)):
@@ -224,11 +236,11 @@ def track_acc_Multi_GIDS(rank, world_size, g, args, label_array=None):
             batch_inputs = ret
             transfer_start = time.time() 
 
-            batch_labels = blocks[-1].dstdata['label']
+            #batch_labels = blocks[-1].dstdata['label']
             
             with nvtx.annotate("Transfer", color="red"):
                 blocks = [block.int().to(device) for block in blocks]
-                batch_labels = batch_labels.to(device)
+                batch_labels = (blocks[-1].dstdata['label']['paper']).to(device) 
             transfer_time = transfer_time +  time.time()  - transfer_start
  
             # Model Training Stage
@@ -304,7 +316,7 @@ if __name__ == '__main__':
         choices=['experimental', 'small', 'medium', 'large', 'full'], 
         help='size of the datasets')
     parser.add_argument('--num_classes', type=int, default=19, 
-        choices=[19, 2983, 172, 128], help='number of classes')
+        choices=[19, 2983, 172, 128, 153], help='number of classes')
     parser.add_argument('--in_memory', type=int, default=0, 
         choices=[0, 1], help='0:read only mmap_mode=r, 1:load into memory')
     parser.add_argument('--synthetic', type=int, default=0,
@@ -315,7 +327,7 @@ if __name__ == '__main__':
         choices=[0, 1], help='0:copy graph=r, 1:shared memory')
     # Model
     parser.add_argument('--model_type', type=str, default='gcn',
-                        choices=['gat', 'sage', 'gcn'])
+                        choices=['rgat', 'rsage', 'rgcn'])
     parser.add_argument('--modelpath', type=str, default='deletethis.pt')
     parser.add_argument('--model_save', type=int, default=0)
 
@@ -385,17 +397,37 @@ if __name__ == '__main__':
     print("Storage Access Accumulator: ", args.accumulator)
 
     labels = None
+    hetero_map = None
     device = f'cuda:' + str(args.device) if torch.cuda.is_available() else 'cpu'
     if(args.data == 'IGB'):
         print("Dataset: IGB")
-        dataset = IGB260MDGLDataset(args)
+        dataset = IGBHeteroDGLDatasetShared(args)
         g = dataset[0]
-        #g  = g.formats('csc')
+        if(args.dataset_size == 'small'):
+            hetero_map = {
+                'paper' : 0,
+                'author' : 1000000,
+                'institute' : 1000000 + 1926066,
+                'fos' : 1000000 + 1926066 + 14751
+            }
+        elif(args.dataset_size == 'full'):
+            hetero_map = {
+                'paper' : 0,
+                'author' : 269346174,
+                'fos' : 546567057,
+                'institute' : 547280017
+            }
     elif(args.data == "OGB"):
         print("Dataset: OGB")
-        dataset = OGBDGLDataset(args)
+        dataset = OGBHeteroDGLDatasetMassiveShared(args)
         g = dataset[0]
-        #g  = g.formats('csc')
+        
+        hetero_map = {
+            'paper' : 0,
+            'author' : 121751666,
+            'num_institute' : 121751666 + 122383112
+        }
+
     else:
         g=None
         dataset=None
@@ -410,7 +442,12 @@ if __name__ == '__main__':
     # shared_graph  = shared_graph.formats('csc')
     # print("Shared Graph: ", shared_graph)
 
-    #mp.spawn(track_acc_Multi_GIDS, args=(num_gpus, g, args, labels), nprocs=num_gpus)
-    mp.spawn(track_acc_Multi_GIDS, args=(num_gpus, shared_graph, args, labels), nprocs=num_gpus)
+
+   
+    
+    
+
+    mp.spawn(track_acc_Multi_GIDS, args=(num_gpus, g, args, labels, hetero_map), nprocs=num_gpus)
+    #mp.spawn(track_acc_Multi_GIDS, args=(num_gpus, shared_graph, args, labels), nprocs=num_gpus)
 
 

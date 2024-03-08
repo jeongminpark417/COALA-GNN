@@ -66,23 +66,151 @@ class _PrefetchingIter(object):
 
     def __next__(self):
         cur_it = self.dataloader_it
-      #  print("iterator: ",cur_it)
-      #  batch = self.GIDS_Loader.distributed_fetch_feature(self.dataloader.dim, cur_it, self.GIDS_Loader.gids_device)
-        #batch = self.GIDS_Loader.fetch_feature(self.dataloader.dim, cur_it, self.GIDS_Loader.gids_device)
-
         if (self.dataloader.use_ddp):
             batch = self.GIDS_Loader.distributed_fetch_feature(self.dataloader.dim, cur_it, self.GIDS_Loader.gids_device)
         else:
             batch = self.GIDS_Loader.fetch_feature(self.dataloader.dim, cur_it, self.GIDS_Loader.gids_device)
-
-        # if(self.static_info):
-        #     batch_SI = self.GIDS_Loader.get_static_info(batch)
-        #     print("batch_SI: ", batch_SI)
-        #     return (batch, batch_SI)
-        # else:
         return batch
 
+class _ID_PrefetchingIter(object):
+    def __init__(self, dataloader, dataloader_it):
+        self.dataloader_it = dataloader_it
+        self.dataloader = dataloader
+        self.graph_sampler = self.dataloader.graph_sampler
+        
+    def __iter__(self):
+        return self
 
+    def __next__(self):
+        cur_it = self.dataloader_it
+        return next(cur_it)
+
+
+
+class ID_Loader(torch.utils.data.DataLoader):
+    def __init__(self, graph, indices, graph_sampler, batch_size, dim, device=None, use_ddp=False,
+                 ddp_seed=0, drop_last=False, shuffle=False,
+                 use_alternate_streams=None,
+
+                 **kwargs):
+
+
+        use_uva = False
+        self.GIDS_Loader = GIDS
+        self.dim = dim
+
+        if isinstance(kwargs.get('collate_fn', None), CollateWrapper):
+            assert batch_size is None       # must be None
+            # restore attributes
+            self.graph = graph
+            self.indices = indices
+            self.graph_sampler = graph_sampler
+            self.device = device
+            self.use_ddp = use_ddp
+            self.ddp_seed = ddp_seed
+            self.shuffle = shuffle
+            self.drop_last = drop_last
+            self.use_alternate_streams = use_alternate_streams
+            self.use_uva = use_uva
+            kwargs['batch_size'] = None
+            super().__init__(**kwargs)
+            return
+
+
+        if isinstance(graph, DistGraph):
+            raise TypeError(
+                'Please use dgl.dataloading.DistNodeDataLoader or '
+                'dgl.datalaoding.DistEdgeDataLoader for DistGraphs.')
+  
+        self.graph = graph
+        self.indices = indices     
+        num_workers = kwargs.get('num_workers', 0)
+
+
+        indices_device = None
+        try:
+            if isinstance(indices, Mapping):
+                indices = {k: (torch.tensor(v) if not torch.is_tensor(v) else v)
+                           for k, v in indices.items()}
+                indices_device = next(iter(indices.values())).device
+            else:
+                indices = torch.tensor(indices) if not torch.is_tensor(indices) else indices
+                indices_device = indices.device
+        except:     # pylint: disable=bare-except
+            # ignore when it fails to convert to torch Tensors.
+            pass
+
+        if indices_device is None:
+            if not hasattr(indices, 'device'):
+                raise AttributeError('Custom indices dataset requires a \"device\" \
+                attribute indicating where the indices is.')
+            indices_device = indices.device
+
+        if device is None:     
+            device = torch.cuda.current_device()
+        self.device = _get_device(device)
+        
+        #pin graph
+        if not self.graph._graph.is_pinned():
+            print("\t\tPinning graph")
+            self.graph._graph.pin_memory_()
+            
+        else:
+            print('\t\tNot pinning Graph')
+
+
+        # Sanity check - we only check for DGLGraphs.
+        if isinstance(self.graph, DGLHeteroGraph):            
+            self.graph.create_formats_()
+            if not self.graph._graph.is_pinned():
+                self.graph._graph.pin_memory_()
+            
+
+            # Check use_alternate_streams
+            if use_alternate_streams is None:
+                use_alternate_streams = (
+                    self.device.type == 'cuda' and self.graph.device.type == 'cpu' and
+                    not use_uva)
+
+        if (torch.is_tensor(indices) or (
+                isinstance(indices, Mapping) and
+                all(torch.is_tensor(v) for v in indices.values()))):
+            self.dataset = create_tensorized_dataset(
+                indices, batch_size, drop_last, use_ddp, ddp_seed, shuffle,
+                kwargs.get('persistent_workers', False))
+        else:
+            self.dataset = indices
+
+        self.ddp_seed = ddp_seed
+        self.use_ddp = use_ddp
+        self.use_uva = use_uva
+        self.shuffle = shuffle
+        self.drop_last = drop_last
+        self.graph_sampler = graph_sampler
+        self.use_alternate_streams = use_alternate_streams
+
+
+        self.cpu_affinity_enabled = False
+
+        worker_init_fn = WorkerInitWrapper(kwargs.get('worker_init_fn', None))
+
+        self.other_storages = {}
+
+        super().__init__(
+            self.dataset,
+            collate_fn=CollateWrapper(
+                self.graph_sampler.sample, graph, self.device),
+            batch_size=None,
+            pin_memory=False,
+            worker_init_fn=worker_init_fn,
+            **kwargs)
+
+    def __iter__(self):
+        if self.shuffle:
+            self.dataset.shuffle()
+        num_threads = torch.get_num_threads() if self.num_workers > 0 else None
+        return _ID_PrefetchingIter(
+            self, super().__iter__())
 
 class GIDS_DGLDataLoader(torch.utils.data.DataLoader):
 
@@ -228,7 +356,6 @@ class GIDS():
         ctrl_idx=0, 
         window_buffer=False,
         accumulator_flag = False, 
-        long_type=False, 
         heterograph=False,
         heterograph_map=None,
         device_id=0,
@@ -244,13 +371,23 @@ class GIDS():
         eviction_policy = None,
         static_info_file = None,
         debug_mode = False,
-        refresh_time = 1):
+        refresh_time = 1, 
+        heterogeneous = False, 
+        hetero_map=None):
         #self.sample_type = "LADIES"
 
-        if(long_type):
-            self.BAM_FS = BAM_Feature_Store.BAM_Feature_Store_long()
-        else:
-            self.BAM_FS = BAM_Feature_Store.BAM_Feature_Store_float()
+ 
+        self.BAM_FS = BAM_Feature_Store.BAM_Feature_Store_float()
+        self.heterogeneous = heterogeneous
+        self.hetero_map = hetero_map
+
+        if(self.heterogeneous):
+            if(hetero_map == None):
+                print("Need key-offset map for heterogeneous graph")
+        
+
+
+        
         
         self.use_PVP = use_PVP
         self.pvp_depth = pvp_depth
@@ -759,10 +896,17 @@ class GIDS():
 
     #Fetching Data from the SSDs
     def distributed_fetch_feature(self, dim, it, device):
-        if(self.use_WB):
-            batch =  self.dist_SA_fetch_feature_WB(dim, it, device)
+        if(self.heterogeneous):
+            if(self.use_WB):
+                batch =  self.dist_SA_fetch_feature_WB_hetero(dim, it, device)
+            else:
+                batch =  self.dist_SA_fetch_feature_hetero(dim, it, device)
+
         else:
-            batch =  self.dist_SA_fetch_feature(dim, it, device)
+            if(self.use_WB):
+                batch =  self.dist_SA_fetch_feature_WB(dim, it, device)
+            else:
+                batch =  self.dist_SA_fetch_feature(dim, it, device)
         return batch
 
 
@@ -771,6 +915,8 @@ class GIDS():
         pointer_list = [tensor.data_ptr() for tensor in tensor_list]
         pointer_tensor = torch.tensor(pointer_list, dtype=torch.int64, device=self.gids_device).contiguous()        
         return pointer_tensor
+
+
 
     def create_ptr_list(self, tensor_list):
         pointer_list = [tensor.data_ptr() for tensor in tensor_list]
@@ -964,6 +1110,12 @@ class GIDS():
             self.distribute_index(dim, it, device)
         self.wb_init = True
 
+    def init_WB_hetero(self, dim, it, device):
+        #print( "World Size: ", self.world_size, " WB size: ", self.wb_size)
+        for i in range(self.wb_size + 1):
+            self.distribute_index_hetero(dim, it, device)
+        self.wb_init = True
+
     def dist_SA_fetch_feature_WB(self, dim, it, device):
         GIDS_time_start = time.time()
         if(self.wb_init == False):
@@ -1112,6 +1264,283 @@ class GIDS():
         batch2 = (*batch, return_torch) 
 
         return batch2
+
+
+
+# Heterogeneous Graph
+
+    def split_index_tensor_hetero(self, index, my_bucket_list, split_len_list, meta_data_list):
+        split_start = time.time()
+        self.BAM_FS.reset_node_counter(self.cpu_index_len_tensor_ptr_list, self.world_size)
+        
+        index_data_ptr_list = []
+        index_size_list = []
+        
+        for key, tensor in index.items():
+            ten_len = tensor.size()[0]
+            if(ten_len != 0):
+                index_size_list.append(tensor.size()[0])
+                index_data_ptr_list.append(tensor.data_ptr())
+
+        self.BAM_FS.split_node_list_init_hetero(index_data_ptr_list, self.world_size, index_size_list, self.index_len_tensor_ptr_list.data_ptr())
+
+        
+        for i in range(self.world_size):
+            bucket_len = self.index_len_tensor_list[i].to("cpu").item()
+            bucket_torch = torch.zeros([bucket_len], dtype=torch.int64, device=self.gids_device).contiguous()
+            meta_torch = torch.zeros([bucket_len], dtype=torch.int64, device=self.gids_device).contiguous()
+
+            my_bucket_list.append(bucket_torch)
+            split_len_list.append(bucket_len)
+            meta_data_list.append(meta_torch)
+
+        my_bucket_ptr_list_tensor = self.create_ptr_list_tensor(my_bucket_list)
+        meta_data_list_tensor = self.create_ptr_list_tensor(meta_data_list)
+        
+        self.BAM_FS.reset_node_counter(self.cpu_index_len_tensor_ptr_list, self.world_size)
+
+        self.BAM_FS.split_node_list_hetero(index_data_ptr_list, self.world_size, index_size_list, my_bucket_ptr_list_tensor.data_ptr(), self.index_len_tensor_ptr_list.data_ptr(), meta_data_list_tensor.data_ptr())
+
+        self.Split_time += (time.time() - split_start)
+
+
+    def distribute_index_hetero(self, dim, it, device):
+        sample_start = time.time()
+        batch = next(it)
+        self.Sampling_time += time.time() - sample_start
+
+        index_dict = batch[0]
+        # index_size_dict = {}
+        # for key, tensor in index_dict.items():
+        #     size = tensor.size()
+        #     index_size_dict[key] = size
+
+
+        # print("index size dict: ", index_size_dict)
+
+        #index = batch[0].to(self.gids_device)
+        #index_size = len(index)   
+
+        orig_index_size_list = []
+        gathered_index_size_list = []
+        gathered_index_list = []
+        meta_data_list = []
+
+        my_bucket_list = []
+        split_tensor_len = []
+
+        self.split_index_tensor_hetero(index_dict, my_bucket_list, split_tensor_len, meta_data_list)
+
+        # Gather Node list counter
+        gather_start = time.time()
+        for i in range(self.world_size):
+            cur_list = None
+            if(self.rank == i):
+                cur_list = self.gathered_index_len_tensor_list
+            dist.gather(self.index_len_tensor_list[i], cur_list, dst=i)
+        
+        self.Communication_time += (time.time() - gather_start)
+
+        self.communication_setup(dim, orig_index_size_list, gathered_index_list, gathered_index_size_list)
+        self.gather_tensors(gathered_index_list, my_bucket_list)
+
+
+        # print("GPU: ", device, "Gather2 done")
+        self.wb_batch_buffer.append(batch)
+        self.wb_orig_index_size_list.append(orig_index_size_list)
+        self.wb_gathered_index_size_list.append(gathered_index_size_list)
+        self.wb_gathered_index_list.append(gathered_index_list)
+        self.wb_meta_data_list.append(meta_data_list)
+        torch.cuda.synchronize()
+
+
+
+    def dist_SA_fetch_feature_hetero(self, dim, it, device):
+
+        GIDS_time_start = time.time()
+
+        self.distribute_index_hetero(dim, it, device)
+
+        batch = self.wb_batch_buffer.pop(0)
+        orig_index_size_list = self.wb_orig_index_size_list.pop(0)
+        gathered_index_size_list = self.wb_gathered_index_size_list.pop(0)
+        gathered_index_list = self.wb_gathered_index_list.pop(0)
+        meta_data_list = self.wb_meta_data_list.pop(0)
+
+
+
+        # Feature Aggregation
+        orig_tensor_list = []
+        gathered_tensor_list = []
+        self.alloc_tensors(dim, orig_index_size_list, orig_tensor_list, gathered_index_size_list, gathered_tensor_list)
+
+        feature_read_start = time.time()
+        index_ptr_list = self.create_ptr_list(gathered_index_list)
+        gathered_torch_ptr_list = self.create_ptr_list(gathered_tensor_list)
+        
+        torch.cuda.synchronize()
+        
+
+
+        static_info_ten_list = []
+        staic_info_ten_ptr_list = []
+        if(self.eviction_policy == 1 or self.eviction_policy == 3):
+            static_info_ten_list, staic_info_ten_ptr_list = self.get_static_info_dist(index_ptr_list, gathered_index_size_list)
+
+        with nvtx.annotate("Feature Aggregation", color="blue"):
+            self.BAM_FS.SA_read_feature_dist(gathered_torch_ptr_list, index_ptr_list, gathered_index_size_list, self.world_size, dim, self.cache_dim, 0, staic_info_ten_ptr_list)
+    
+
+        self.agg_time += time.time() - feature_read_start
+
+        # Gathering Minibatch Tensors
+        self.gather_tensors(orig_tensor_list, gathered_tensor_list)
+
+
+        # GPU to GPU memcpy
+        with nvtx.annotate("GPU to GPU Memcpy", color="green"):
+            return_torch = {}
+            gather_start = time.time()
+            return_torch_ptr_list = []
+            for k , v in batch[0].items():
+                if(len(v) == 0):
+                        empty_t = torch.empty((0, dim)).to(self.gids_device)
+                        return_torch[k] = empty_t
+                else:
+                    key_off = 0
+                    if (k in self.hetero_map):
+                            key_off = self.hetero_map[k]
+                    else:
+                        print("Cannot find key: ", k, " in the heterograph map!")
+                    
+                    return_ten =  torch.zeros([len(v),dim], dtype=torch.float, device=self.gids_device)
+                    return_torch[k] = return_ten
+                    return_torch_ptr_list.append(return_ten.data_ptr())
+
+
+
+            dist_gather_ptr_list = self.create_ptr_list(orig_tensor_list)
+            meta_ptr_list = self.create_ptr_list(meta_data_list)
+
+
+
+            return_torch_ptr_ten = torch.tensor(return_torch_ptr_list, dtype=torch.int64, device=self.gids_device).contiguous()     
+
+            #self.BAM_FS.gather_feature_list(return_torch.data_ptr(),dist_gather_ptr_list, orig_index_size_list, self.world_size, dim,  self.rank, meta_ptr_list)
+            self.BAM_FS.gather_feature_list_hetero(return_torch_ptr_ten.data_ptr(), dist_gather_ptr_list, orig_index_size_list, self.world_size, dim,  self.rank, meta_ptr_list)
+
+            self.Gather_time += (time.time()) - gather_start
+
+            reset_start = time.time()
+            self.BAM_FS.reset_node_counter(self.cpu_index_len_tensor_ptr_list, self.world_size)
+            self.Reset_time += (time.time()) - reset_start
+
+            self.GIDS_time += time.time() - GIDS_time_start        
+        batch2 = (*batch, return_torch) 
+
+        return batch2
+
+    def dist_SA_fetch_feature_WB_hetero(self, dim, it, device):
+
+        GIDS_time_start = time.time()
+        
+        if(self.wb_init == False):
+            self.init_WB_hetero(dim, it, device)
+
+        self.distribute_index_hetero(dim, it, device)
+
+        batch = self.wb_batch_buffer.pop(0)
+        orig_index_size_list = self.wb_orig_index_size_list.pop(0)
+        gathered_index_size_list = self.wb_gathered_index_size_list.pop(0)
+        gathered_index_list = self.wb_gathered_index_list.pop(0)
+        meta_data_list = self.wb_meta_data_list.pop(0)
+
+
+        with nvtx.annotate("Fill Batch", color="green"):
+            self.BAM_FS.fill_batch()
+
+        # Feature Aggregation
+        orig_tensor_list = []
+        gathered_tensor_list = []
+        self.alloc_tensors(dim, orig_index_size_list, orig_tensor_list, gathered_index_size_list, gathered_tensor_list)
+
+        feature_read_start = time.time()
+        index_ptr_list = self.create_ptr_list(gathered_index_list)
+        gathered_torch_ptr_list = self.create_ptr_list(gathered_tensor_list)
+        
+        torch.cuda.synchronize()
+        
+
+
+        static_info_ten_list = []
+        staic_info_ten_ptr_list = []
+        if(self.eviction_policy == 1 or self.eviction_policy == 3):
+            static_info_ten_list, staic_info_ten_ptr_list = self.get_static_info_dist(index_ptr_list, gathered_index_size_list)
+
+        with nvtx.annotate("Feature Aggregation", color="blue"):
+            self.BAM_FS.SA_read_feature_dist(gathered_torch_ptr_list, index_ptr_list, gathered_index_size_list, self.world_size, dim, self.cache_dim, 0, staic_info_ten_ptr_list)
+    
+
+        self.agg_time += time.time() - feature_read_start
+
+        # Gathering Minibatch Tensors
+        torch.distributed.barrier()
+
+        self.gather_tensors(orig_tensor_list, gathered_tensor_list)
+
+
+        # GPU to GPU memcpy
+        with nvtx.annotate("GPU to GPU Memcpy", color="green"):
+            return_torch = {}
+            gather_start = time.time()
+            return_torch_ptr_list = []
+            for k , v in batch[0].items():
+                if(len(v) == 0):
+                        empty_t = torch.empty((0, dim)).to(self.gids_device)
+                        return_torch[k] = empty_t
+                else:
+                    key_off = 0
+                    if (k in self.hetero_map):
+                            key_off = self.hetero_map[k]
+                    else:
+                        print("Cannot find key: ", k, " in the heterograph map!")
+                    
+                    return_ten =  torch.zeros([len(v),dim], dtype=torch.float, device=self.gids_device)
+                    return_torch[k] = return_ten
+                    return_torch_ptr_list.append(return_ten.data_ptr())
+
+
+
+            dist_gather_ptr_list = self.create_ptr_list(orig_tensor_list)
+            meta_ptr_list = self.create_ptr_list(meta_data_list)
+            return_torch_ptr_ten = torch.tensor(return_torch_ptr_list, dtype=torch.int64, device=self.gids_device).contiguous()     
+
+            self.BAM_FS.gather_feature_list_hetero(return_torch_ptr_ten.data_ptr(), dist_gather_ptr_list, orig_index_size_list, self.world_size, dim,  self.rank, meta_ptr_list)
+
+            self.Gather_time += (time.time()) - gather_start
+
+            reset_start = time.time()
+            self.BAM_FS.reset_node_counter(self.cpu_index_len_tensor_ptr_list, self.world_size)
+            self.Reset_time += (time.time()) - reset_start
+
+            self.GIDS_time += time.time() - GIDS_time_start        
+        batch2 = (*batch, return_torch) 
+
+
+        with nvtx.annotate("Prefetching", color="red"):
+            self.BAM_FS.prefetch_from_victim_queue()
+
+        # Updating Reuse Value
+        wb_index_list_tensor = self.create_ptr_list_tensor_2D(self.wb_gathered_index_list, device, 1)
+        wb_size_list_tensor = self.create_tensor_from_list_2D(self.wb_gathered_index_size_list, 1)
+
+        with nvtx.annotate("Update Counters", color="red"):
+            self.BAM_FS.update_reuse_counters(wb_index_list_tensor.data_ptr(), wb_size_list_tensor.data_ptr(), self.max_sample_size, self.world_size, self.wb_size)
+
+ 
+
+        return batch2
+
 
 
     def dist_SA_fetch_feature_fast_gather(self, dim, it, device):

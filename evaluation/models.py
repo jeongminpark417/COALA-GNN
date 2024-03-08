@@ -174,8 +174,25 @@ class RSAGE(nn.Module):
                 h = apply_each(h, self.dropout)
         return self.linear(h['paper'])
 
+
+# class GAT(nn.Module):
+#     def __init__(
+#         self, in_feats, n_hidden, n_classes, n_layers, num_heads
+#     ):
+#         super().__init__()
+#         self.n_layers = n_layers
+#         self.n_hidden = n_hidden
+#         self.n_classes = n_classes
+#         self.layers = nn.ModuleList()
+#         self.layers.append(
+#             dglnn.GATConv(
+#                 (in_feats, in_feats),
+#                 n_hidden,
+#                 num_heads=num_heads
+#             )
+#         )
 class RGAT(nn.Module):
-    def __init__(self, etypes, in_feats, h_feats, num_classes, num_layers=2, dropout=0.2, n_heads=4):
+    def __init__(self, etypes, in_feats, h_feats, num_classes, num_layers=2, n_heads=4, dropout=0.2):
         super().__init__()
         self.layers = nn.ModuleList()
         self.layers.append(HeteroGraphConv({
@@ -188,8 +205,11 @@ class RGAT(nn.Module):
         self.layers.append(HeteroGraphConv({
             etype: GATConv(h_feats, h_feats // n_heads, n_heads)
             for etype in etypes}))
+
+     
         self.dropout = nn.Dropout(dropout)
         self.linear = nn.Linear(h_feats, num_classes)
+
 
     def forward(self, blocks, x):
         h = x
@@ -200,5 +220,6 @@ class RGAT(nn.Module):
                 h = apply_each(h, F.relu)
                 h = apply_each(h, self.dropout)
         return self.linear(h['paper'])   
+
 
       

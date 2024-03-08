@@ -5,6 +5,9 @@ import torch, torch.nn as nn, torch.optim as optim
 import time, tqdm, numpy as np
 from models import *
 from dataloader import IGB260MDGLDataset, OGBDGLDataset
+from dataloader import IGBHeteroDGLDataset, IGBHeteroDGLDatasetMassive, OGBHeteroDGLDatasetMassive
+
+
 import csv 
 import warnings
 
@@ -25,6 +28,72 @@ torch.manual_seed(0)
 dgl.seed(0)
 warnings.filterwarnings("ignore")
 
+def compute_pagerank_hetero(g, DAMP, K):
+    # Assuming N is the total number of nodes across all types
+    N = sum([g.number_of_nodes(ntype) for ntype in g.ntypes])
+    pv_init_value = torch.ones(N) / N
+    degrees = torch.zeros(N, dtype=torch.float32)
+
+    # Initialize PageRank values for each node type
+    offset = 0
+    for ntype in g.ntypes:
+        n = g.number_of_nodes(ntype)
+        g.nodes[ntype].data['pv'] = pv_init_value[offset:offset+n]
+        offset += n
+
+
+
+    func_dict = {}
+    for etype in g.etypes:
+        func_dict[etype] = (fn.copy_u('pv','m'), fn.sum('m', 'pv'))
+    
+
+    for k in range(K):
+        for etype in g.etypes:
+            #print("etype: ", etype)
+        
+            cur_degrees = g.in_degrees(v='__ALL__', etype=etype).type(torch.float32)
+            if(etype == 'affiliated_to'):
+                g.nodes['institute'].data['pv'] /=  cur_degrees
+            elif(etype == 'cites'):
+                g.nodes['paper'].data['pv'] /= cur_degrees
+            elif(etype == 'topic'):
+                g.nodes['fos'].data['pv'] /= cur_degrees
+            elif(etype == 'written_by'):
+                g.nodes['author'].data['pv'] /= cur_degrees
+                
+
+
+
+        g.multi_update_all(func_dict, cross_reducer="sum")
+
+        for ntype in g.ntypes:
+            g.nodes[ntype].data['pv'] = (1 - DAMP) / N + DAMP * g.nodes[ntype].data['pv']
+    return pv_init_value
+
+
+#        degress = degrees + cur_degrees
+
+
+    return None
+    # for k in range(K):
+    #     for ntype in g.ntypes:
+    #         # Distribute PageRank values across edges uniformly
+    #         g.nodes[ntype].data['pv'] /= g.out_degrees(etype='__ALL__').float().clamp(min=1)
+        
+    #     # Message passing for each edge type
+    #     for etype in g.etypes:
+    #         g.update_all(message_func=fn.copy_u('pv', 'm'),
+    #                      reduce_func=fn.sum('m', 'pv'),
+    #                      etype=etype)
+        
+    #     # Update PageRank values with damping factor
+    #     for ntype in g.ntypes:
+    #         g.nodes[ntype].data['pv'] = (1 - DAMP) / N + DAMP * g.nodes[ntype].data['pv']
+    
+    # # Collect and return PageRank values
+    # pr_values = {ntype: g.nodes[ntype].data['pv'] for ntype in g.ntypes}
+    # return pr_values
     
 def compute_pagerank(g, DAMP, K, N):
     g.ndata['pv'] = torch.ones(N) / N
@@ -102,28 +171,56 @@ if __name__ == '__main__':
     parser.add_argument('--uva_graph', type=int, default=0)
     parser.add_argument('--emb_size', type=int, default=1024)
 
-   
+
+    parser.add_argument('--hetero', action='store_true', help='Heterogenous Graph')
 
     args = parser.parse_args()
     
     labels = None
    # device = f'cuda:' + str(args.device) if torch.cuda.is_available() else 'cpu'
-    if(args.data == 'IGB'):
-        print("Dataset: IGB")
-        dataset = IGB260MDGLDataset(args)
-        g = dataset[0]
-        g  = g.formats('csc')
-    elif(args.data == "OGB"):
-        print("Dataset: OGB")
-        dataset = OGBDGLDataset(args)
-        g = dataset[0]
+    
+    if(args.hetero):
+        if(args.data == 'IGB'):
+            print("Dataset: IGBH")
+            if(args.dataset_size == 'full' or args.dataset_size == 'large'):
+                dataset = IGBHeteroDGLDatasetMassive(args)
+            else:
+                dataset = IGBHeteroDGLDataset(args)
+
+            g = dataset[0]
+            #g  = g.formats('csc')
+        elif(args.data == "OGB"):
+            print("Dataset: MAG")
+            dataset = OGBHeteroDGLDatasetMassive(args)
+            g = dataset[0]
+            #g  = g.formats('csc')
+        else:
+            g=None
+            dataset=None
+
+
     else:
-        g=None
-        dataset=None
+        if(args.data == 'IGB'):
+            print("Dataset: IGB")
+            dataset = IGB260MDGLDataset(args)
+            g = dataset[0]
+            g  = g.formats('csc')
+        elif(args.data == "OGB"):
+            print("Dataset: OGB")
+            dataset = OGBDGLDataset(args)
+            g = dataset[0]
+        else:
+            g=None
+            dataset=None
 
-    N = g.number_of_nodes()
+   
+    pr_val = None
+    if(args.hetero):
+        pr_val = compute_pagerank_hetero(g, args.damp, args.K)
 
-    pr_val = compute_pagerank(g, args.damp, args.K, N)
+    else:
+        N = g.number_of_nodes()
+        pr_val = compute_pagerank(g, args.damp, args.K, N)
     norm_pv = normalize_pagerank_to_uint8(pr_val)
     #norm_pv = normalize_pagerank_to_uint16(pr_val)
     save_to_binary_file(args.out_path, norm_pv)

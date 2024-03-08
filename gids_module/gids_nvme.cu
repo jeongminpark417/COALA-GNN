@@ -667,20 +667,43 @@ void BAM_Feature_Store<TYPE>::gather_feature_list(uint64_t i_return_ptr, const s
   for (int i = 0; i < num_gpu; i++) {
       cudaStreamDestroy(streams[i]);
   }
-  
-  // auto t2 = Clock::now();
-
-  //   auto us = std::chrono::duration_cast<std::chrono::microseconds>(
-  //     t2 - t1); // Microsecond (as int)
-  // auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-  //     t2 - t1); // Microsecond (as int)
-  // const float ms_fractional =
-  //     static_cast<float>(us.count()) / 1000; // Milliseconds (as float)
-
-  // printf("gather kernel time: %f\n", ms_fractional);
-
-
 }
+
+
+template <typename TYPE>
+void BAM_Feature_Store<TYPE>::gather_feature_list_hetero(uint64_t i_return_ptr, const std::vector<uint64_t>&  i_return_ptr_list, const std::vector<uint64_t>&  index_size_list, 
+                                            int num_gpu, int dim, int my_rank, const std::vector<uint64_t>&  i_meta_buffer){
+
+  TYPE** final_tensor_ptr = (TYPE **)i_return_ptr;
+ cudaStream_t streams[num_gpu];
+  for (int i = 0; i < num_gpu; i++) {
+      cudaStreamCreate(&streams[i]);
+  }
+  
+  cuda_err_chk(cudaDeviceSynchronize());
+  auto t1 = Clock::now();
+
+  for (int i = 0; i < num_gpu; i++) {
+    TYPE* src_tensor_ptr = (TYPE *)(i_return_ptr_list[i]);
+    uint64_t index_size = index_size_list[i];
+
+    uint64_t* d_meta_buffer_ptr =  (uint64_t* ) (i_meta_buffer[i]);
+
+    uint64_t b_size = 256;
+    //uint64_t n_warp = b_size / 32;
+    //uint64_t g_size = (index_size+n_warp - 1) / n_warp;
+    uint64_t g_size = index_size;
+    gather_feature_hetero_kernel<TYPE><<<g_size, b_size, 0, streams[i]>>>(final_tensor_ptr, src_tensor_ptr,
+                                                d_meta_buffer_ptr, dim, index_size, i, my_rank);
+
+  }
+
+  cuda_err_chk(cudaDeviceSynchronize());
+  for (int i = 0; i < num_gpu; i++) {
+      cudaStreamDestroy(streams[i]);
+  }
+}
+
 
 
 
@@ -697,6 +720,39 @@ void BAM_Feature_Store<TYPE>::split_node_list_init(uint64_t i_index_ptr, int64_t
     cuda_err_chk(cudaDeviceSynchronize());
 }
 
+
+template <typename TYPE>
+void BAM_Feature_Store<TYPE>::split_node_list_init_hetero(const std::vector<uint64_t>& index_ptr_list, int64_t num_gpu,
+                                              const std::vector<uint64_t>& index_size_list, uint64_t i_index_pointer_list){
+    
+    int num_feat = index_ptr_list.size();
+
+    cudaStream_t streams[num_feat];
+    for (int i = 0; i < num_feat; i++) {
+      cudaStreamCreate(&streams[i]);
+    }
+
+    uint64_t off = 0;
+    uint64_t* index_pointer_list = (uint64_t *) i_index_pointer_list;
+
+    for (int i = 0; i < num_feat; i++) {
+      int64_t* index_ptr = (int64_t *)(index_ptr_list[i]);
+      uint64_t index_size = index_size_list[i];
+      size_t g_size = (index_size + 1023)/1024;
+
+      split_node_list_init_kernel<TYPE><<<g_size,1024, 0, streams[i]>>>(index_ptr, index_pointer_list, num_gpu, index_size);
+
+      off += index_size;
+    }
+  
+
+    cuda_err_chk(cudaDeviceSynchronize());
+    for (int i = 0; i < num_feat; i++) {
+        cudaStreamDestroy(streams[i]);
+    }
+    
+}
+
 template <typename TYPE>
 void BAM_Feature_Store<TYPE>::split_node_list(uint64_t i_index_ptr, int64_t num_gpu, 
                                               int64_t index_size, uint64_t i_bucket_ptr_list, uint64_t i_index_pointer_list,
@@ -711,6 +767,41 @@ void BAM_Feature_Store<TYPE>::split_node_list(uint64_t i_index_ptr, int64_t num_
 
     split_node_list_kernel<TYPE><<<g_size,1024>>>(index_ptr, bucket_ptr_list, index_pointer_list, num_gpu, index_size, meta_buffer_list_ptr);
     cuda_err_chk(cudaDeviceSynchronize());
+}
+
+template <typename TYPE>
+void BAM_Feature_Store<TYPE>::split_node_list_hetero(const std::vector<uint64_t>& index_ptr_list, int64_t num_gpu, 
+                                              const std::vector<uint64_t>& index_size_list, uint64_t i_bucket_ptr_list, uint64_t i_index_pointer_list,
+                                              uint64_t i_meta_buffer){
+
+    int num_feat = index_ptr_list.size();
+
+    cudaStream_t streams[num_feat];
+    for (int i = 0; i < num_feat; i++) {
+      cudaStreamCreate(&streams[i]);
+    }
+                                        
+
+
+    uint64_t* index_pointer_list = (uint64_t *) i_index_pointer_list;
+    uint64_t* meta_buffer_list_ptr = (uint64_t*) i_meta_buffer;
+    uint64_t* bucket_ptr_list = (uint64_t *) i_bucket_ptr_list;
+
+    for (int i = 0; i < num_feat; i++) {
+      int64_t* index_ptr = (int64_t *)(index_ptr_list[i]);
+      uint64_t index_size = index_size_list[i];
+      size_t g_size = (index_size + 1023)/1024;
+
+      split_node_list_hetero_kernel<TYPE><<<g_size,1024, 0, streams[i] >>>(index_ptr, bucket_ptr_list, index_pointer_list, num_gpu, index_size, meta_buffer_list_ptr, i);
+
+     // off += index_size;
+    }
+
+    cuda_err_chk(cudaDeviceSynchronize());
+    for (int i = 0; i < num_feat; i++) {
+        cudaStreamDestroy(streams[i]);
+    }
+
 }
 
 
@@ -1002,10 +1093,16 @@ PYBIND11_MODULE(BAM_Feature_Store, m) {
       .def("SA_read_feature_dist", &BAM_Feature_Store<float>::SA_read_feature_dist)
 
       .def("split_node_list_init", &BAM_Feature_Store<float>::split_node_list_init)
+      .def("split_node_list_init_hetero", &BAM_Feature_Store<float>::split_node_list_init_hetero)
+
       .def("split_node_list", &BAM_Feature_Store<float>::split_node_list)
+      .def("split_node_list_hetero", &BAM_Feature_Store<float>::split_node_list_hetero)
+
       .def("reset_node_counter", &BAM_Feature_Store<float>::reset_node_counter)
       .def("create_meta_buffer", &BAM_Feature_Store<float>::create_meta_buffer)
       .def("gather_feature_list", &BAM_Feature_Store<float>::gather_feature_list)
+      .def("gather_feature_list_hetero", &BAM_Feature_Store<float>::gather_feature_list_hetero)
+
       .def("update_reuse_counters", &BAM_Feature_Store<float>::update_reuse_counters)
 
       .def("set_window_buffering", &BAM_Feature_Store<float>::set_window_buffering)
@@ -1055,13 +1152,19 @@ PYBIND11_MODULE(BAM_Feature_Store, m) {
 
 
       .def("split_node_list_init", &BAM_Feature_Store<int64_t>::split_node_list_init)
+      .def("split_node_list_init_hetero", &BAM_Feature_Store<int64_t>::split_node_list_init_hetero)
+
       .def("split_node_list", &BAM_Feature_Store<int64_t>::split_node_list)
+      .def("split_node_list_hetero", &BAM_Feature_Store<int64_t>::split_node_list_hetero)
+
+      
       .def("reset_node_counter", &BAM_Feature_Store<int64_t>::reset_node_counter)
       .def("create_meta_buffer", &BAM_Feature_Store<int64_t>::create_meta_buffer)
       .def("gather_feature_list", &BAM_Feature_Store<int64_t>::gather_feature_list)
+      .def("gather_feature_list_hetero", &BAM_Feature_Store<int64_t>::gather_feature_list_hetero)
+
+      
       .def("update_reuse_counters", &BAM_Feature_Store<int64_t>::update_reuse_counters)
-
-
 
 
       .def("set_window_buffering", &BAM_Feature_Store<int64_t>::set_window_buffering)
