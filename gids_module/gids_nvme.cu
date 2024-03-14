@@ -722,6 +722,21 @@ void BAM_Feature_Store<TYPE>::split_node_list_init(uint64_t i_index_ptr, int64_t
 
 
 template <typename TYPE>
+void BAM_Feature_Store<TYPE>::split_node_list_init2(uint64_t i_index_ptr, int64_t num_gpu,
+                                              int64_t index_size, uint64_t i_index_pointer_list){
+    int64_t* index_ptr = (int64_t *)i_index_ptr;
+    uint64_t* index_pointer_list = (uint64_t *) i_index_pointer_list;
+    
+    size_t g_size = (index_size + 1023)/1024;
+
+    split_node_list_init_kernel2<TYPE><<<g_size,1024>>>(index_ptr, index_pointer_list, num_gpu, index_size);
+    cuda_err_chk(cudaDeviceSynchronize());
+}
+
+
+
+
+template <typename TYPE>
 void BAM_Feature_Store<TYPE>::split_node_list_init_hetero(const std::vector<uint64_t>& index_ptr_list, int64_t num_gpu,
                                               const std::vector<uint64_t>& index_size_list, uint64_t i_index_pointer_list){
     
@@ -766,6 +781,22 @@ void BAM_Feature_Store<TYPE>::split_node_list(uint64_t i_index_ptr, int64_t num_
     size_t g_size = (index_size + 1023)/1024;
 
     split_node_list_kernel<TYPE><<<g_size,1024>>>(index_ptr, bucket_ptr_list, index_pointer_list, num_gpu, index_size, meta_buffer_list_ptr);
+    cuda_err_chk(cudaDeviceSynchronize());
+}
+
+template <typename TYPE>
+void BAM_Feature_Store<TYPE>::split_node_list2(uint64_t i_index_ptr, int64_t num_gpu, 
+                                              int64_t index_size, uint64_t i_bucket_ptr_list, uint64_t i_index_pointer_list,
+                                              uint64_t i_meta_buffer){
+    int64_t* index_ptr = (int64_t *)i_index_ptr;
+    uint64_t* index_pointer_list = (uint64_t *) i_index_pointer_list;
+    uint64_t* bucket_ptr_list = (uint64_t *) i_bucket_ptr_list;
+
+    uint64_t* meta_buffer_list_ptr = (uint64_t*) i_meta_buffer;
+
+    size_t g_size = (index_size + 1023)/1024;
+
+    split_node_list_kernel2<TYPE><<<g_size,1024>>>(index_ptr, bucket_ptr_list, index_pointer_list, num_gpu, index_size, meta_buffer_list_ptr);
     cuda_err_chk(cudaDeviceSynchronize());
 }
 
@@ -828,6 +859,15 @@ void BAM_Feature_Store<TYPE>::reset_node_counter(const std::vector<uint64_t>&  i
       cudaMemset(add, 0, sizeof(int64_t));
     }
 }
+
+
+template <typename TYPE>
+void BAM_Feature_Store<TYPE>::reset_node_counter2(uint64_t  i_index_pointer_list, int num_gpu){
+      void* add = (void*) i_index_pointer_list;
+      cudaMemset(add, 0, sizeof(int64_t) * num_gpu);
+}
+
+
 
 template <typename TYPE>
 void BAM_Feature_Store<TYPE>::create_meta_buffer(uint64_t num_gpu, uint64_t max_size){

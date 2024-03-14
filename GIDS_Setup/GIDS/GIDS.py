@@ -372,6 +372,7 @@ class GIDS():
         static_info_file = None,
         debug_mode = False,
         refresh_time = 1, 
+        shared_tensor = None,
         heterogeneous = False, 
         hetero_map=None):
         #self.sample_type = "LADIES"
@@ -388,7 +389,8 @@ class GIDS():
 
 
         
-        
+        self.shared_tensor = shared_tensor
+        self.shared_tensor_list = []
         self.use_PVP = use_PVP
         self.pvp_depth = pvp_depth
         #DDP parameters
@@ -513,25 +515,34 @@ class GIDS():
         
 
 
-        if(use_ddp):
+        self.test_flag = False
+        if(use_ddp and self.test_flag == False):
             self.index_len_tensor_list = [torch.zeros([1], dtype=torch.int64).to(self.gids_device) for i in range(self.world_size)]
             self.gathered_index_len_tensor_list = [torch.zeros([1], dtype=torch.int64).to(self.gids_device) for i in range(self.world_size)]
-
-            print("index len tensor list: ", self.index_len_tensor_list)
-            print("Data Type:", self.index_len_tensor_list[0].dtype)
+            
+          
 
             index_len_tensor_ptr_list = []
             for i in range(self.world_size):
                 index_len_tensor_ptr_list.append(self.index_len_tensor_list[i].data_ptr())
-            print("index len tensor ptr list 1: ", index_len_tensor_ptr_list)
             
             self.cpu_index_len_tensor_ptr_list = index_len_tensor_ptr_list
-
-
             self.index_len_tensor_ptr_list = torch.tensor(index_len_tensor_ptr_list,dtype=torch.int64).to(self.gids_device).contiguous()
-            print("index len tensor ptr list: ", self.index_len_tensor_ptr_list)
 
-#            self.BAM_FS.create_meta_buffer(self.world_size, self.max_sample_size)
+         #            self.BAM_FS.create_meta_buffer(self.world_size, self.max_sample_size)
+
+
+        # elif(use_ddp and self.test_flag == True):
+        #     self.index_len_tensor = torch.zeros([self.world_size], dtype=torch.int64).to(self.gids_device) 
+        #     self.gathered_index_len_tensor = torch.zeros([self.world_size], dtype=torch.int64).to(self.gids_device) 
+            
+            # index_len_tensor_ptr_list = []
+            # for i in range(self.world_size):
+            #     index_len_tensor_ptr_list.append(self.index_len_tensor_list[i].data_ptr())
+            
+            # self.cpu_index_len_tensor_ptr_list = index_len_tensor_ptr_list
+            # self.index_len_tensor_ptr_list = torch.tensor(index_len_tensor_ptr_list,dtype=torch.int64).to(self.gids_device).contiguous()
+
 
 
     
@@ -972,17 +983,13 @@ class GIDS():
     def split_index_tensor(self, index, my_bucket_list, split_len_list, meta_data_list):
         split_start = time.time()
         index_size = len(index)   
-       # print("GPU: ", self.rank, "\t Before  index len tensor list: ", self.index_len_tensor_list)
         self.BAM_FS.reset_node_counter(self.cpu_index_len_tensor_ptr_list, self.world_size)
 
         self.BAM_FS.split_node_list_init(index.data_ptr(), self.world_size, index_size, self.index_len_tensor_ptr_list.data_ptr())
-       # print("GPU: ", self.rank, "\t After index len tensor list: ", self.index_len_tensor_list)
 
         
         for i in range(self.world_size):
             bucket_len = self.index_len_tensor_list[i].to("cpu").item()
-          #  print("GPU: ", self.rank, "i: ",i, " bucket len:", bucket_len)
-
 
             bucket_torch = torch.zeros([bucket_len], dtype=torch.int64, device=self.gids_device).contiguous()
             meta_torch = torch.zeros([bucket_len], dtype=torch.int64, device=self.gids_device).contiguous()
@@ -1000,36 +1007,92 @@ class GIDS():
         self.Split_time += (time.time() - split_start)
 
 
+
+    def split_index_tensor2(self, index, my_bucket_list, split_len_list, meta_data_list):
+        split_start = time.time()
+        index_size = len(index)   
+
+        self.BAM_FS.reset_node_counter2(self.index_len_tensor.data_ptr(), self.world_size)
+        self.BAM_FS.split_node_list_init2(index.data_ptr(), self.world_size, index_size, self.index_len_tensor.data_ptr())
+
+        cpu_ten =  self.index_len_tensor.to("cpu")
+        for i in range(self.world_size):
+            bucket_len = cpu_ten[i].item()
+
+            bucket_torch = torch.zeros([bucket_len], dtype=torch.int64, device=self.gids_device).contiguous()
+            meta_torch = torch.zeros([bucket_len], dtype=torch.int64, device=self.gids_device).contiguous()
+
+            my_bucket_list.append(bucket_torch)
+            split_len_list.append(bucket_len)
+            meta_data_list.append(meta_torch)
+
+        my_bucket_ptr_list_tensor = self.create_ptr_list_tensor(my_bucket_list)
+        meta_data_list_tensor = self.create_ptr_list_tensor(meta_data_list)
+        
+        self.BAM_FS.reset_node_counter2(self.index_len_tensor.data_ptr(), self.world_size)
+        self.BAM_FS.split_node_list(index.data_ptr(), self.world_size, index_size, my_bucket_ptr_list_tensor.data_ptr(), self.index_len_tensor.data_ptr(), meta_data_list_tensor.data_ptr())
+
+        self.Split_time += (time.time() - split_start)
+
+
     # dist_list is updated
+    @nvtx.annotate("Gather Tensor Func", color="green")
     def gather_tensors(self, dst_list, src_list):
         com_start = time.time()
         for i in range(self.world_size):
             #Sender
             if(self.rank == i):
                 for j in range(self.world_size):
-                   # print("\t\t\ RANK: ", self.rank, "j: ", j)
-
                     if(self.rank != j):
-                        #print("\t\t RANK: ", self.rank, " send size: ",len(src_list[j]), " send: ",src_list[j])
                         dist.send(tensor=src_list[j], dst=j)
                     else:
-                        #print("\t\t RANK: ", self.rank, " copy: ",src_list[j], " to ", dst_list[j])
                         dst_list[j] = src_list[j]
-                   
             #Receiver
             else:
-                #print("\t\t RANK: ", self.rank, " recv size: ",len(dst_list[i]), " recv: ",dst_list[i])
                 dist.recv(tensor=dst_list[i], src=i)
 
         self.Communication_time += (time.time() - com_start)
         return
 
+    @nvtx.annotate("Gather Tensor AsyncFunc", color="green")
+    def gather_tensors_async(self, dst_list, src_list):
+        com_start = time.time()
+        requests = []
+
+        for i in range(self.world_size):
+            # Sender
+            if self.rank == i:
+                for j in range(self.world_size):
+                    if self.rank != j:
+                        req = dist.isend(tensor=src_list[j], dst=j)
+                        requests.append(req)
+                    else:
+                        dst_list[j] = src_list[j]
+            # Receiver
+            else:
+                req = dist.irecv(tensor=dst_list[i], src=i)
+                requests.append(req)
+
+        # Wait for all communications to complete
+        for req in requests:
+            req.wait()
+
+        torch.distributed.barrier()
+
+        self.Communication_time += (time.time() - com_start)
+        return
+
+
     def communication_setup(self, dim, orig_index_size_list, gathered_index_list, gathered_index_size_list):
         setup_start = time.time()
         for i in range(self.world_size):
-            cur_len = self.gathered_index_len_tensor_list[i].to("cpu")
-            # cur_return_torch =  torch.zeros([cur_len,dim], dtype=torch.float, device=self.gids_device).contiguous()
-            # gathered_tensor_list.append(cur_return_torch)
+            #cur_len = self.gathered_index_len_tensor_list[i].to("cpu")
+
+    
+            cur_len = self.shared_tensor[i][self.rank]
+
+            #print("Rank: ", self.rank, "shared cur len: ", cur_len1, "cur len: ", cur_len)
+
 
             gathered_index_size_list.append(cur_len.item())
 
@@ -1037,8 +1100,21 @@ class GIDS():
             gathered_index_list.append(cur_index_torch)
 
             recv_len = self.index_len_tensor_list[i].to("cpu")
-            # cur_return_torch_final =  torch.zeros([recv_len,dim], dtype=torch.float, device=self.gids_device).contiguous()
-            # orig_tensor_list.append(cur_return_torch_final)
+            orig_index_size_list.append(recv_len) 
+        self.Communication_setup_time += (time.time() - setup_start)
+
+    def communication_setup2(self, dim, orig_index_size_list, gathered_index_list, gathered_index_size_list):
+        setup_start = time.time()
+        for i in range(self.world_size):
+            cur_len = self.gathered_index_len_tensor[i].to("cpu")
+
+
+            gathered_index_size_list.append(cur_len.item())
+
+            cur_index_torch = torch.zeros([cur_len], dtype=torch.int64, device=self.gids_device).contiguous()
+            gathered_index_list.append(cur_index_torch)
+
+            recv_len = self.index_len_tensor[i].to("cpu")
             orig_index_size_list.append(recv_len) 
         self.Communication_setup_time += (time.time() - setup_start)
 
@@ -1062,6 +1138,35 @@ class GIDS():
         #    self.alloc_flag_tensors(dim, gathered_index_size_list, fill_batch_flag_list)
 
 
+    def distribute_index2(self, dim, it, device):
+            sample_start = time.time()
+            batch = next(it)
+            self.Sampling_time += time.time() - sample_start
+
+            index = batch[0].to(self.gids_device)
+            index_size = len(index)   
+
+            orig_index_size_list = []
+            gathered_index_size_list = []
+            gathered_index_list = []
+            meta_data_list = []
+
+            my_bucket_list = []
+            split_tensor_len = []
+            self.split_index_tensor2(index, my_bucket_list, split_tensor_len, meta_data_list)
+
+            with nvtx.annotate("Init Broadcast", color="green"):
+                gather_start = time.time()
+                for i in range(self.world_size):
+                    cur_list = None
+                    if(self.rank == i):
+                        cur_list = self.gathered_index_len_tensor_list
+                    # print("cur list: ", cur_list)
+                    dist.gather(self.index_len_tensor_list[i], cur_list, dst=i)
+            
+            self.Communication_time += (time.time() - gather_start)
+        
+
 
     def distribute_index(self, dim, it, device):
         sample_start = time.time()
@@ -1081,18 +1186,34 @@ class GIDS():
 
         self.split_index_tensor(index, my_bucket_list, split_tensor_len, meta_data_list)
 
+        torch.cuda.synchronize()
         # Gather Node list counter
-        gather_start = time.time()
-        for i in range(self.world_size):
-            cur_list = None
-            if(self.rank == i):
-                cur_list = self.gathered_index_len_tensor_list
-            dist.gather(self.index_len_tensor_list[i], cur_list, dst=i)
+        # with nvtx.annotate("Init Broadcast", color="green"):
+        #     gather_start = time.time()
+        #     for i in range(self.world_size):
+        #         cur_list = None
+        #         if(self.rank == i):
+        #             cur_list = self.gathered_index_len_tensor_list
+        #         dist.gather(self.index_len_tensor_list[i], cur_list, dst=i)
+        #     #print("rank: ", self.rank," cur list: ", self.index_len_tensor_list)
+        #     self.Communication_time += (time.time() - gather_start)
         
-        self.Communication_time += (time.time() - gather_start)
+        # torch.distributed.barrier()
+        with nvtx.annotate("Init Broadcast2", color="red"):
+            for i in range(self.world_size):
+                cur_list = self.index_len_tensor_list[i].item()
+               # print("rank: ", self.rank, " i: ", i, "cur len : ", cur_list)
+                self.shared_tensor[self.rank][i] = cur_list
 
-        self.communication_setup(dim, orig_index_size_list, gathered_index_list, gathered_index_size_list)
-        self.gather_tensors(gathered_index_list, my_bucket_list)
+        torch.distributed.barrier()
+ 
+    
+
+        with nvtx.annotate("Comm setup", color="blue"):
+            self.communication_setup(dim, orig_index_size_list, gathered_index_list, gathered_index_size_list)
+        
+        with nvtx.annotate("Broadcast Node IDs", color="green"):
+            self.gather_tensors(gathered_index_list, my_bucket_list)
 
 
         # print("GPU: ", device, "Gather2 done")
@@ -1132,20 +1253,11 @@ class GIDS():
         
         torch.cuda.synchronize()
 
-        # # Updating Reuse Value
-        # wb_index_list_tensor = self.create_ptr_list_tensor_2D(self.wb_gathered_index_list, device)
-        # wb_size_list_tensor = self.create_tensor_from_list_2D(self.wb_gathered_index_size_list)
-
-        # with nvtx.annotate("Update Counters", color="red"):
-        #     self.BAM_FS.update_reuse_counters(wb_index_list_tensor.data_ptr(), wb_size_list_tensor.data_ptr(), self.max_sample_size, self.world_size, self.wb_size)
-
-
+    
         
         with nvtx.annotate("Fill Batch", color="green"):
             self.BAM_FS.fill_batch()
-        #torch.cuda.synchronize()
 
-        #print("GPU: ", device,"World Size: ", self.world_size, "\t\t Fill Batch Done")
 
         # Feature Aggregation
         orig_tensor_list = []
@@ -1169,7 +1281,7 @@ class GIDS():
         torch.distributed.barrier()
 
         # Gathering Minibatch Tensors
-        self.gather_tensors(orig_tensor_list, gathered_tensor_list)
+        self.gather_tensors_async(orig_tensor_list, gathered_tensor_list)
 
         # GPU to GPU memcpy
         gather_start = time.time()
@@ -1177,7 +1289,9 @@ class GIDS():
 
         dist_gather_ptr_list = self.create_ptr_list(orig_tensor_list)
         meta_ptr_list = self.create_ptr_list(meta_data_list)
-        self.BAM_FS.gather_feature_list(return_torch.data_ptr(),dist_gather_ptr_list, orig_index_size_list, self.world_size, dim,  self.rank, meta_ptr_list)
+        
+        with nvtx.annotate("Gather Tensor", color="blue"):
+            self.BAM_FS.gather_feature_list(return_torch.data_ptr(),dist_gather_ptr_list, orig_index_size_list, self.world_size, dim,  self.rank, meta_ptr_list)
         self.Gather_time += (time.time()) - gather_start
 
         reset_start = time.time()
@@ -1212,11 +1326,6 @@ class GIDS():
         meta_data_list = self.wb_meta_data_list.pop(0)
         index_size = len(batch[0]) 
 
-        # print("GPU: ",self.rank, "batch: ", batch)
-        #batch_SI = self.get_static_info(batch)
-        # print("GPU: ", self.rank," batch SI: ", batch_SI)
-
-        # Feature Aggregation
         orig_tensor_list = []
         gathered_tensor_list = []
         self.alloc_tensors(dim, orig_index_size_list, orig_tensor_list, gathered_index_size_list, gathered_tensor_list)
@@ -1242,7 +1351,7 @@ class GIDS():
         self.agg_time += time.time() - feature_read_start
 
         # Gathering Minibatch Tensors
-        self.gather_tensors(orig_tensor_list, gathered_tensor_list)
+        self.gather_tensors_async(orig_tensor_list, gathered_tensor_list)
 
 
         # GPU to GPU memcpy
@@ -1310,17 +1419,7 @@ class GIDS():
         self.Sampling_time += time.time() - sample_start
 
         index_dict = batch[0]
-        # index_size_dict = {}
-        # for key, tensor in index_dict.items():
-        #     size = tensor.size()
-        #     index_size_dict[key] = size
-
-
-        # print("index size dict: ", index_size_dict)
-
-        #index = batch[0].to(self.gids_device)
-        #index_size = len(index)   
-
+ 
         orig_index_size_list = []
         gathered_index_size_list = []
         gathered_index_list = []

@@ -47,11 +47,15 @@ def print_times(transfer_time, train_time, e2e_time):
     print("train time: ", train_time)
     print("e2e time: ", e2e_time)
 
-def track_acc_Multi_GIDS(rank, world_size, g, args, label_array=None):
+def track_acc_Multi_GIDS(rank, world_size, shared_tensor, g, args, label_array=None):
     print("Rank: ", rank, " GNN trainign starts")
 
     init_process_group(world_size, rank)
     print("Rank: ", rank, " Init Process done")
+
+
+
+
 
     device = torch.device('cuda:{:d}'.format(rank))
     torch.cuda.set_device(device)
@@ -86,7 +90,8 @@ def track_acc_Multi_GIDS(rank, world_size, g, args, label_array=None):
         debug_mode = False,
         static_info_file = args.static_info_file,
         eviction_policy = args.eviction_policy,
-        refresh_time = args.refresh_time
+        refresh_time = args.refresh_time,
+        shared_tensor = shared_tensor
     
     )
     dim = args.emb_size
@@ -407,10 +412,15 @@ if __name__ == '__main__':
     print("Garph: ", g)
 
     shared_graph = g
+
+
+    sh_tensor = torch.zeros((num_gpus, num_gpus), dtype=torch.int64)
+    sh_tensor.share_memory_()
+
     # shared_graph  = shared_graph.formats('csc')
     # print("Shared Graph: ", shared_graph)
 
     #mp.spawn(track_acc_Multi_GIDS, args=(num_gpus, g, args, labels), nprocs=num_gpus)
-    mp.spawn(track_acc_Multi_GIDS, args=(num_gpus, shared_graph, args, labels), nprocs=num_gpus)
+    mp.spawn(track_acc_Multi_GIDS, args=(num_gpus, sh_tensor,shared_graph, args, labels), nprocs=num_gpus)
 
 

@@ -202,6 +202,18 @@ split_node_list_init_kernel(int64_t* index_ptr, uint64_t* index_pointer_list,  i
 
 template <typename T = float>
 __global__ void 
+split_node_list_init_kernel2(int64_t* index_ptr, uint64_t* ten_pointer,  int64_t num_gpu,  int64_t index_size){
+  uint64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+  if(idx < index_size){
+    int64_t cur_node = index_ptr[idx];
+    int64_t gpu_id = cur_node % num_gpu;
+    atomicAdd((unsigned int*) (ten_pointer + gpu_id), (unsigned int )1);
+  }
+}
+
+
+template <typename T = float>
+__global__ void 
 split_node_list_kernel(int64_t* index_ptr, uint64_t* dist_index_ptr,  uint64_t* index_pointer_list,  int64_t num_gpu, int64_t index_size, 
     uint64_t* meta_buffer_ptr){
   
@@ -218,6 +230,26 @@ split_node_list_kernel(int64_t* index_ptr, uint64_t* dist_index_ptr,  uint64_t* 
     dist_index[enq_idx] = cur_node;
   }
 }
+
+template <typename T = float>
+__global__ void 
+split_node_list_kernel2(int64_t* index_ptr, uint64_t* dist_index_ptr,  uint64_t* index_pointer_list,  int64_t num_gpu, int64_t index_size, 
+    uint64_t* meta_buffer_ptr){
+  
+  uint64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+
+  if(idx < index_size){
+    int64_t cur_node = index_ptr[idx];
+    int64_t gpu_id = cur_node % num_gpu;
+    unsigned long long int enq_idx = atomicAdd((unsigned long long int*) (index_pointer_list + gpu_id), (unsigned long long int)1);
+
+    int64_t* dist_index = (int64_t*) (dist_index_ptr[gpu_id]);
+    uint64_t* meta_buffer = (uint64_t*) (meta_buffer_ptr[gpu_id]);
+    meta_buffer[enq_idx] = idx;
+    dist_index[enq_idx] = cur_node;
+  }
+}
+
 
 
 template <typename T = float>
