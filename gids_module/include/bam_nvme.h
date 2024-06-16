@@ -167,6 +167,7 @@ struct BAM_Feature_Store {
 
   void set_window_buffering(uint64_t id_idx,  int64_t num_pages, int hash_off); 
   void print_stats();
+  void print_stats_rank(uint32_t);
   void print_stats_no_ctrl();
 
  
