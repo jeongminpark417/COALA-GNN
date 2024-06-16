@@ -280,6 +280,43 @@ void BAM_Feature_Store<TYPE>::print_stats(){
 
 
 template <typename TYPE>
+void BAM_Feature_Store<TYPE>::print_stats_rank(uint32_t rank){
+
+  if(!set_associative_cache){
+    std::cout << "print stats: ";
+    this->h_pc->print_reset_stats();
+    std::cout << std::endl;
+
+    std::cout << "print array reset: ";
+    this->a->print_reset_stats();
+    std::cout << std::endl;
+
+  }
+  else{
+    print_kernel<TYPE><<<1,1>>>(cache_ptr, debug_mode, evict_counter, prefetch_counter);
+	  cuda_err_chk(cudaDeviceSynchronize())
+  }
+
+
+    for(int i = 0; i < n_ctrls; i++){
+    std::cout << "GPU: " << rank << " print ctrl reset " << i << ": ";
+      (this->ctrls[i])->print_reset_stats();
+      std::cout << std::endl;
+    }
+  
+ 
+  std::cout << "GPU: " << rank << "Kernel Time: \t " << this->kernel_time << std::endl;
+  this->kernel_time = 0;
+  std::cout << "GPU: " << rank  << "Total Access: \t " << this->total_access << std::endl;
+  this->total_access = 0;
+
+  SA_handle -> print_evicted_cl();
+
+}
+
+
+
+template <typename TYPE>
 void BAM_Feature_Store<TYPE>::read_feature(uint64_t i_ptr, uint64_t i_index_ptr,
                                      int64_t num_index, int dim, int cache_dim, uint64_t key_off = 0) {
 
@@ -721,17 +758,17 @@ void BAM_Feature_Store<TYPE>::split_node_list_init(uint64_t i_index_ptr, int64_t
 }
 
 
-template <typename TYPE>
-void BAM_Feature_Store<TYPE>::split_node_list_init2(uint64_t i_index_ptr, int64_t num_gpu,
-                                              int64_t index_size, uint64_t i_index_pointer_list){
-    int64_t* index_ptr = (int64_t *)i_index_ptr;
-    uint64_t* index_pointer_list = (uint64_t *) i_index_pointer_list;
+// template <typename TYPE>
+// void BAM_Feature_Store<TYPE>::split_node_list_init2(uint64_t i_index_ptr, int64_t num_gpu,
+//                                               int64_t index_size, uint64_t i_index_pointer_list){
+//     int64_t* index_ptr = (int64_t *)i_index_ptr;
+//     uint64_t* index_pointer_list = (uint64_t *) i_index_pointer_list;
     
-    size_t g_size = (index_size + 1023)/1024;
+//     size_t g_size = (index_size + 1023)/1024;
 
-    split_node_list_init_kernel2<TYPE><<<g_size,1024>>>(index_ptr, index_pointer_list, num_gpu, index_size);
-    cuda_err_chk(cudaDeviceSynchronize());
-}
+//     split_node_list_init_kernel2<TYPE><<<g_size,1024>>>(index_ptr, index_pointer_list, num_gpu, index_size);
+//     cuda_err_chk(cudaDeviceSynchronize());
+// }
 
 
 
@@ -784,21 +821,21 @@ void BAM_Feature_Store<TYPE>::split_node_list(uint64_t i_index_ptr, int64_t num_
     cuda_err_chk(cudaDeviceSynchronize());
 }
 
-template <typename TYPE>
-void BAM_Feature_Store<TYPE>::split_node_list2(uint64_t i_index_ptr, int64_t num_gpu, 
-                                              int64_t index_size, uint64_t i_bucket_ptr_list, uint64_t i_index_pointer_list,
-                                              uint64_t i_meta_buffer){
-    int64_t* index_ptr = (int64_t *)i_index_ptr;
-    uint64_t* index_pointer_list = (uint64_t *) i_index_pointer_list;
-    uint64_t* bucket_ptr_list = (uint64_t *) i_bucket_ptr_list;
+// template <typename TYPE>
+// void BAM_Feature_Store<TYPE>::split_node_list2(uint64_t i_index_ptr, int64_t num_gpu, 
+//                                               int64_t index_size, uint64_t i_bucket_ptr_list, uint64_t i_index_pointer_list,
+//                                               uint64_t i_meta_buffer){
+//     int64_t* index_ptr = (int64_t *)i_index_ptr;
+//     uint64_t* index_pointer_list = (uint64_t *) i_index_pointer_list;
+//     uint64_t* bucket_ptr_list = (uint64_t *) i_bucket_ptr_list;
 
-    uint64_t* meta_buffer_list_ptr = (uint64_t*) i_meta_buffer;
+//     uint64_t* meta_buffer_list_ptr = (uint64_t*) i_meta_buffer;
 
-    size_t g_size = (index_size + 1023)/1024;
+//     size_t g_size = (index_size + 1023)/1024;
 
-    split_node_list_kernel2<TYPE><<<g_size,1024>>>(index_ptr, bucket_ptr_list, index_pointer_list, num_gpu, index_size, meta_buffer_list_ptr);
-    cuda_err_chk(cudaDeviceSynchronize());
-}
+//     split_node_list_kernel2<TYPE><<<g_size,1024>>>(index_ptr, bucket_ptr_list, index_pointer_list, num_gpu, index_size, meta_buffer_list_ptr);
+//     cuda_err_chk(cudaDeviceSynchronize());
+// }
 
 template <typename TYPE>
 void BAM_Feature_Store<TYPE>::split_node_list_hetero(const std::vector<uint64_t>& index_ptr_list, int64_t num_gpu, 
@@ -861,11 +898,11 @@ void BAM_Feature_Store<TYPE>::reset_node_counter(const std::vector<uint64_t>&  i
 }
 
 
-template <typename TYPE>
-void BAM_Feature_Store<TYPE>::reset_node_counter2(uint64_t  i_index_pointer_list, int num_gpu){
-      void* add = (void*) i_index_pointer_list;
-      cudaMemset(add, 0, sizeof(int64_t) * num_gpu);
-}
+// template <typename TYPE>
+// void BAM_Feature_Store<TYPE>::reset_node_counter2(uint64_t  i_index_pointer_list, int num_gpu){
+//       void* add = (void*) i_index_pointer_list;
+//       cudaMemset(add, 0, sizeof(int64_t) * num_gpu);
+// }
 
 
 
@@ -1172,6 +1209,8 @@ PYBIND11_MODULE(BAM_Feature_Store, m) {
       .def("create_static_info_buffer", &BAM_Feature_Store<float>::create_static_info_buffer)
 
       .def("print_stats", &BAM_Feature_Store<float>::print_stats)
+      .def("print_stats_rank", &BAM_Feature_Store<float>::print_stats_rank)
+
       .def("print_meta_buffer", &BAM_Feature_Store<float>::print_meta_buffer);
 
 
@@ -1232,6 +1271,7 @@ PYBIND11_MODULE(BAM_Feature_Store, m) {
       .def("create_static_info_buffer", &BAM_Feature_Store<int64_t>::create_static_info_buffer)
 
       .def("print_stats", &BAM_Feature_Store<int64_t>::print_stats)
+          .def("print_stats_rank", &BAM_Feature_Store<int64_t>::print_stats_rank)
       .def("print_meta_buffer", &BAM_Feature_Store<int64_t>::print_meta_buffer);
 
       

@@ -1138,33 +1138,7 @@ class GIDS():
         #    self.alloc_flag_tensors(dim, gathered_index_size_list, fill_batch_flag_list)
 
 
-    def distribute_index2(self, dim, it, device):
-            sample_start = time.time()
-            batch = next(it)
-            self.Sampling_time += time.time() - sample_start
 
-            index = batch[0].to(self.gids_device)
-            index_size = len(index)   
-
-            orig_index_size_list = []
-            gathered_index_size_list = []
-            gathered_index_list = []
-            meta_data_list = []
-
-            my_bucket_list = []
-            split_tensor_len = []
-            self.split_index_tensor2(index, my_bucket_list, split_tensor_len, meta_data_list)
-
-            with nvtx.annotate("Init Broadcast", color="green"):
-                gather_start = time.time()
-                for i in range(self.world_size):
-                    cur_list = None
-                    if(self.rank == i):
-                        cur_list = self.gathered_index_len_tensor_list
-                    # print("cur list: ", cur_list)
-                    dist.gather(self.index_len_tensor_list[i], cur_list, dst=i)
-            
-            self.Communication_time += (time.time() - gather_start)
         
 
 
@@ -1187,18 +1161,7 @@ class GIDS():
         self.split_index_tensor(index, my_bucket_list, split_tensor_len, meta_data_list)
 
         torch.cuda.synchronize()
-        # Gather Node list counter
-        # with nvtx.annotate("Init Broadcast", color="green"):
-        #     gather_start = time.time()
-        #     for i in range(self.world_size):
-        #         cur_list = None
-        #         if(self.rank == i):
-        #             cur_list = self.gathered_index_len_tensor_list
-        #         dist.gather(self.index_len_tensor_list[i], cur_list, dst=i)
-        #     #print("rank: ", self.rank," cur list: ", self.index_len_tensor_list)
-        #     self.Communication_time += (time.time() - gather_start)
-        
-        # torch.distributed.barrier()
+        gather_start = time.time()
         with nvtx.annotate("Init Broadcast2", color="red"):
             for i in range(self.world_size):
                 cur_list = self.index_len_tensor_list[i].item()
@@ -1206,7 +1169,8 @@ class GIDS():
                 self.shared_tensor[self.rank][i] = cur_list
 
         torch.distributed.barrier()
- 
+        self.Communication_time += (time.time() - gather_start)
+
     
 
         with nvtx.annotate("Comm setup", color="blue"):
@@ -1430,14 +1394,22 @@ class GIDS():
 
         self.split_index_tensor_hetero(index_dict, my_bucket_list, split_tensor_len, meta_data_list)
 
-        # Gather Node list counter
+        # # Gather Node list counter
+        # for i in range(self.world_size):
+        #     cur_list = None
+        #     if(self.rank == i):
+        #         cur_list = self.gathered_index_len_tensor_list
+        #     dist.gather(self.index_len_tensor_list[i], cur_list, dst=i)
+        torch.cuda.synchronize()
         gather_start = time.time()
-        for i in range(self.world_size):
-            cur_list = None
-            if(self.rank == i):
-                cur_list = self.gathered_index_len_tensor_list
-            dist.gather(self.index_len_tensor_list[i], cur_list, dst=i)
+
+        with nvtx.annotate("Init Broadcast2", color="red"):
+            for i in range(self.world_size):
+                cur_list = self.index_len_tensor_list[i].item()
+               # print("rank: ", self.rank, " i: ", i, "cur len : ", cur_list)
+                self.shared_tensor[self.rank][i] = cur_list
         
+        torch.distributed.barrier()
         self.Communication_time += (time.time() - gather_start)
 
         self.communication_setup(dim, orig_index_size_list, gathered_index_list, gathered_index_size_list)
@@ -1755,7 +1727,7 @@ class GIDS():
         self.Reset_time = 0.0
 
 
-        self.BAM_FS.print_stats()
+        self.BAM_FS.print_stats_rank(self.rank)
         
         if (self.graph_GIDS != None):
             self.graph_GIDS.print_stats_no_ctrl()
