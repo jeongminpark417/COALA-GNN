@@ -94,5 +94,31 @@ target_compile_options(BAM_Feature_Store PRIVATE
     ${CMAKE_CURRENT_BINARY_DIR}/BAM_Feature_Store/setup.py
   )
 
+
+
+# Second Python module
+ADD_LIBRARY(Graph_Coloring SHARED graph_coloring.cpp )
+
+target_include_directories(Graph_Coloring PRIVATE ./include )
+
+SET_TARGET_PROPERTIES( Graph_Coloring
+  PROPERTIES
+    PREFIX ""
+    LIBRARY_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/Graph_Coloring"
+)
+
+target_compile_options(Graph_Coloring PRIVATE $<$<COMPILE_LANGUAGE:CXX>:
+  -std=c++11;
+  -O3;
+>)
+
+CONFIGURE_FILE( Graph_Coloring/__init__.py
+  ${CMAKE_CURRENT_BINARY_DIR}/Graph_Coloring/__init__.py
+)
+
+CONFIGURE_FILE( Graph_Coloring/setup.py
+  ${CMAKE_CURRENT_BINARY_DIR}/Graph_Coloring/setup.py
+)
+
 #ENDIF()
 
