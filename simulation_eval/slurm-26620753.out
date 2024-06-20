@@ -1,36 +1,0 @@
-Dataset: IGB
-node edge: tensor([[40073, 78219],
-        [78219, 40073],
-        [40073, 96565],
-        ...,
-        [65110, 28558],
-        [28558, 32466],
-        [32466, 28558]])
-self graph:  {'created': ['coo'], 'not created': ['csr', 'csc']}
-skipping feat
-self graph2:  {'created': ['coo'], 'not created': ['csr', 'csc']}
-self graph3:  {'created': ['coo'], 'not created': ['csr', 'csc']}
-		Pinning graph
-  0%|          | 0/1 [00:00<?, ?it/s]100%|██████████| 1/1 [00:00<00:00,  8.07it/s]100%|██████████| 1/1 [00:00<00:00,  8.06it/s]
-step:  0
-input nodes:  tensor([58331, 14079, 26692,  ..., 52735, 32714, 95691], device='cuda:0')
-step:  1
-input nodes:  tensor([59979,  7127,  9582,  ..., 91341, 49311, 84916], device='cuda:0')
-step:  2
-input nodes:  tensor([59525,  4198, 13345,  ...,  7238, 84794, 43213], device='cuda:0')
-step:  3
-input nodes:  tensor([ 2143, 48255, 15397,  ..., 78595, 85821, 97639], device='cuda:0')
-step:  4
-input nodes:  tensor([31861, 42094, 11869,  ..., 14172, 31266, 58691], device='cuda:0')
-step:  5
-input nodes:  tensor([14853, 38278, 56453,  ..., 51229, 23484, 85698], device='cuda:0')
-step:  6
-input nodes:  tensor([ 6035, 39912, 45545,  ..., 68093, 76338, 78992], device='cuda:0')
-step:  7
-input nodes:  tensor([ 7822, 43853, 36602,  ..., 22920, 51193, 89339], device='cuda:0')
-step:  8
-input nodes:  tensor([ 7686,  1319, 43458,  ..., 78965, 23346, 72535], device='cuda:0')
-step:  9
-input nodes:  tensor([ 1223, 11370, 20837,  ..., 67359, 77884, 32489], device='cuda:0')
-step:  10
-input nodes:  tensor([ 5716, 35873, 24914,  ..., 57998, 72533, 92825], device='cuda:0')

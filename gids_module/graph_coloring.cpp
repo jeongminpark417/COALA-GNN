@@ -117,6 +117,13 @@ void Graph_Coloring::set_topk_color_buffer(uint64_t i_ptr){
     topk_color_buf = (uint64_t*) i_ptr;
 }
 
+
+void Graph_Coloring::set_adj_csc(uint64_t i_indp, uint64_t i_indices){
+    indptr =  (uint64_t*) i_indp;
+    indices = (uint64_t*) i_indices;
+}
+
+
 uint64_t Graph_Coloring::get_num_color(){
     return color_counter;
 }
@@ -132,6 +139,7 @@ PYBIND11_MODULE(Graph_Coloring, m) {
     .def("cpu_count_nearest_color", &Graph_Coloring::cpu_count_nearest_color)
     .def("set_color_buffer", &Graph_Coloring::set_color_buffer)
     .def("set_topk_color_buffer", &Graph_Coloring::set_topk_color_buffer)
+    .def("set_adj_csc", &Graph_Coloring::set_adj_csc)
     .def("get_num_color", &Graph_Coloring::get_num_color);
 }
 

@@ -29,6 +29,8 @@ struct Graph_Coloring {
 
     void set_color_buffer(uint64_t);
     void set_topk_color_buffer(uint64_t);
+    void set_adj_csc(uint64_t, uint64_t);
+
     uint64_t get_num_color();
 
     uint64_t* color_buf = nullptr;
