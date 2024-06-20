@@ -16,28 +16,36 @@ def color_graph(g, args, device):
     g.ndata['labels'] = g.ndata['label']
     
     
-    Grah_Coloring_Tool = Graph_Coloring.Graph_Coloring()
+    num_nodes = g.number_of_nodes()
+    Grah_Coloring_Tool = Graph_Coloring(num_nodes)
 
     adj_csc = g.adj_tensors('csc')
     indptr = adj_csc[0]
     indices = adj_csc[1]
 
+    Grah_Coloring_Tool.set_adj_csc(indptr.data_ptr(), indices.data_ptr())
+    print(f"indptr len: {len(indptr)} indices len: {len(indices)}")
 
-    num_nodes = g.number_of_nodes()
+    max_int64 = (1 << 63) - 1
+
+    #color_tensor = torch.full((num_nodes,), max_int64, dtype=torch.int64).contiguous()
     color_tensor = torch.empty(num_nodes, dtype=torch.int64).contiguous()
-
+    
     Grah_Coloring_Tool.set_color_buffer(color_tensor.data_ptr())
     Grah_Coloring_Tool.cpu_color_graph()
     
     num_colors = Grah_Coloring_Tool.get_num_color()
+    print(f"num_colors: {num_colors}")
 
-    topk_color_tensor =  torch.empty(num_colors * args.topk, dtype=torch.int64).contiguous()
+    topk_color_tensor =  torch.zeros(num_colors * args.topk, dtype=torch.int64).contiguous()
     
     Grah_Coloring_Tool.set_topk_color_buffer(topk_color_tensor.data_ptr())
+    print("count nearest colors")
     Grah_Coloring_Tool.cpu_count_nearest_color()
-
+    print("saving torch")
     torch.save(topk_color_tensor, args.out_path)
-
+    
+    
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()

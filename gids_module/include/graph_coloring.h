@@ -15,10 +15,10 @@
 struct Graph_Coloring {
     uint64_t num_nodes = 0;
     uint64_t num_colored_nodes = 0;
-    uint64_t color_counter = 0;
+    uint64_t color_counter = 1;
     int step_num = 1;
-    int global_max_hop = 1;
-    float global_sampling_rate = 0.001;
+    int global_max_hop = 10;
+    float global_sampling_rate = 0.01;
 
     int topk = 10;
     void cpu_color_graph();
@@ -40,6 +40,7 @@ struct Graph_Coloring {
     uint64_t* indptr = nullptr;
     uint64_t* indices = nullptr;
 
+    Graph_Coloring(uint64_t);
     private:
         std::vector<std::pair<uint64_t, uint64_t>> bfs_buffers[2];
         std::unordered_map<uint64_t, std::unordered_map<uint64_t, uint64_t>> color_connectivity_map;

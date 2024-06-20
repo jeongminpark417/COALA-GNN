@@ -4,7 +4,7 @@
 void Graph_Coloring::cpu_sample_nodes(){
     for (uint64_t i = 0; i < num_nodes; i++){
         //If the node does not have a color
-        if(color_buf[i] == UINT64_MAX) {
+        if(color_buf[i] == 0) {
             float samp = static_cast<float>(rand()) / RAND_MAX;
             if (samp <= global_sampling_rate){
                 bfs_buffers[0].push_back(std::make_pair(i, color_counter)); // (Node, Color) pair
@@ -17,7 +17,6 @@ void Graph_Coloring::cpu_sample_nodes(){
 void Graph_Coloring::cpu_color_neighbors_csc(int buffer_id, uint64_t node, uint64_t color){
     auto start_idx = indptr[node];
     auto end_idx = indptr[node+1];
-
     for (auto i = start_idx; i < end_idx; i++){
         bfs_buffers[buffer_id].push_back(std::make_pair(indices[i], color));
     }
@@ -28,7 +27,7 @@ void Graph_Coloring::cpu_flush_buffer(int buffer_id){
     while (!(bfs_buffers[buffer_id].empty())) {
         auto cur_pair = bfs_buffers[buffer_id].back();
         bfs_buffers[buffer_id].pop_back();
-        if(color_buf[cur_pair.first] == UINT64_MAX) {
+        if(color_buf[cur_pair.first] == 0) {
             color_buf[cur_pair.first] = cur_pair.second;
             num_colored_nodes++;
         }
@@ -49,7 +48,7 @@ void Graph_Coloring::cpu_color_graph(){
             auto cur_pair = bfs_buffers[cur_buffer_id].back();
             bfs_buffers[cur_buffer_id].pop_back();
             //check color
-            if(color_buf[cur_pair.first] == UINT64_MAX) {
+            if(color_buf[cur_pair.first] == 0) {
                 //does not have color
                 color_buf[cur_pair.first] = cur_pair.second;
                 num_colored_nodes++;
@@ -92,20 +91,20 @@ void Graph_Coloring::cpu_count_nearest_color(){
 
             for (auto i = start_idx; i < end_idx; i++){
                 auto neighbor_color = color_buf[indices[i]];
-                if(color != neighbor_color) {
+		
+		if(neighbor_color != 0 && color != neighbor_color) {
                     color_connectivity_map[color][neighbor_color] += 1;
                 }
             }
     }
-
         for (const auto& cur_key_map : color_connectivity_map) {
             auto cur_color = cur_key_map.first;
             auto topk_colors = getTopK(cur_key_map.second, topk);
             //color count
-            for(int i = 0; i < topk; i++){
-                topk_color_buf[cur_color * topk + i] = topk_colors[i].second;
-            }
-        }      
+            for(int i = 0; i < topk_colors.size(); i++){
+                topk_color_buf[(cur_color-1) * topk + i] = topk_colors[i].first;
+	    }
+        } 
 }
 
 
@@ -125,7 +124,13 @@ void Graph_Coloring::set_adj_csc(uint64_t i_indp, uint64_t i_indices){
 
 
 uint64_t Graph_Coloring::get_num_color(){
-    return color_counter;
+    if(color_counter == 0) return 0;
+
+    return color_counter - 1;
+}
+
+Graph_Coloring::Graph_Coloring(uint64_t n_nodes){
+	num_nodes = n_nodes;
 }
 
 PYBIND11_MODULE(Graph_Coloring, m) {
@@ -134,7 +139,7 @@ PYBIND11_MODULE(Graph_Coloring, m) {
   namespace py = pybind11;
 
     py::class_<Graph_Coloring>(m, "Graph_Coloring")
-    .def(py::init<>())
+    .def(py::init<uint64_t>())
     .def("cpu_color_graph", &Graph_Coloring::cpu_color_graph)
     .def("cpu_count_nearest_color", &Graph_Coloring::cpu_count_nearest_color)
     .def("set_color_buffer", &Graph_Coloring::set_color_buffer)
