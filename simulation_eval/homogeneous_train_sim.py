@@ -115,7 +115,7 @@ if __name__ == '__main__':
     parser.add_argument('--hidden_channels', type=int, default=128)
     parser.add_argument('--learning_rate', type=float, default=0.01)
     parser.add_argument('--decay', type=float, default=0.001)
-    parser.add_argument('--epochs', type=int, default=3)
+    parser.add_argument('--epochs', type=int, default=1)
     parser.add_argument('--num_layers', type=int, default=6)
     parser.add_argument('--num_heads', type=int, default=4)
     parser.add_argument('--log_every', type=int, default=2)
