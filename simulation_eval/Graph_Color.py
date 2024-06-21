@@ -37,13 +37,17 @@ def color_graph(g, args, device):
     num_colors = Grah_Coloring_Tool.get_num_color()
     print(f"num_colors: {num_colors}")
 
+    num_colored_nodes = Grah_Coloring_Tool.get_num_color_node()
+    print(f"num colored node: {num_colored_nodes}")
+
     topk_color_tensor =  torch.zeros(num_colors * args.topk, dtype=torch.int64).contiguous()
     
     Grah_Coloring_Tool.set_topk_color_buffer(topk_color_tensor.data_ptr())
     print("count nearest colors")
     Grah_Coloring_Tool.cpu_count_nearest_color()
     print("saving torch")
-    torch.save(topk_color_tensor, args.out_path)
+    torch.save(color_tensor, args.out_path_color)
+    torch.save(topk_color_tensor, args.out_path_topk)
     
     
 
@@ -65,8 +69,10 @@ if __name__ == '__main__':
     parser.add_argument('--emb_size', type=int, default=1024)
 
     #Output file format
-    parser.add_argument('--out_path', type=str, default='./out.pt', 
-        help='path for the output file')
+    parser.add_argument('--out_path_color', type=str, default='./color.pt',
+        help='path for the output color file')
+    parser.add_argument('--out_path_topk', type=str, default='./topk.pt', 
+        help='path for the output topk file')
 
     parser.add_argument('--topk', type=int, default=10)
     parser.add_argument('--device', type=int, default=0)

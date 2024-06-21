@@ -125,9 +125,14 @@ void Graph_Coloring::set_adj_csc(uint64_t i_indp, uint64_t i_indices){
 
 uint64_t Graph_Coloring::get_num_color(){
     if(color_counter == 0) return 0;
-
     return color_counter - 1;
 }
+
+uint64_t Graph_Coloring::get_num_color_node(){
+
+	return num_colored_nodes;
+}
+
 
 Graph_Coloring::Graph_Coloring(uint64_t n_nodes){
 	num_nodes = n_nodes;
@@ -145,6 +150,7 @@ PYBIND11_MODULE(Graph_Coloring, m) {
     .def("set_color_buffer", &Graph_Coloring::set_color_buffer)
     .def("set_topk_color_buffer", &Graph_Coloring::set_topk_color_buffer)
     .def("set_adj_csc", &Graph_Coloring::set_adj_csc)
+    .def("get_num_color_node", &Graph_Coloring::get_num_color_node)
     .def("get_num_color", &Graph_Coloring::get_num_color);
 }
 
