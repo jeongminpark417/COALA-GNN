@@ -42,6 +42,7 @@ struct Graph_Coloring {
     uint64_t* indices = nullptr;
 
     Graph_Coloring(uint64_t);
+    ~Graph_Coloring();
     private:
         std::vector<std::pair<uint64_t, uint64_t>> bfs_buffers[2];
         std::unordered_map<uint64_t, std::unordered_map<uint64_t, uint64_t>> color_connectivity_map;

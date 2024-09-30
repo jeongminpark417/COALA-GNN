@@ -1,6 +1,6 @@
 import argparse, datetime
 import dgl
-import sklearn.metrics
+#import sklearn.metrics
 import torch, torch.nn as nn, torch.optim as optim
 import time, tqdm, numpy as np
 
@@ -17,6 +17,7 @@ def color_graph(g, args, device):
     
     
     num_nodes = g.number_of_nodes()
+    print("number of nodes: ", num_nodes)
     Grah_Coloring_Tool = Graph_Coloring(num_nodes)
 
     adj_csc = g.adj_tensors('csc')
@@ -29,7 +30,7 @@ def color_graph(g, args, device):
     max_int64 = (1 << 63) - 1
 
     #color_tensor = torch.full((num_nodes,), max_int64, dtype=torch.int64).contiguous()
-    color_tensor = torch.empty(num_nodes, dtype=torch.int64).contiguous()
+    color_tensor = torch.zeros(num_nodes, dtype=torch.int64).contiguous()
     
     Grah_Coloring_Tool.set_color_buffer(color_tensor.data_ptr())
     Grah_Coloring_Tool.cpu_color_graph()
@@ -45,19 +46,23 @@ def color_graph(g, args, device):
     Grah_Coloring_Tool.set_topk_color_buffer(topk_color_tensor.data_ptr())
     print("count nearest colors")
     Grah_Coloring_Tool.cpu_count_nearest_color()
+
+    del Grah_Coloring_Tool
     print("saving torch")
     torch.save(color_tensor, args.out_path_color)
+    topk_color_tensor = topk_color_tensor.reshape(num_colors, args.topk)
+
     torch.save(topk_color_tensor, args.out_path_topk)
-    
-    
+    print("DONE")
+ 
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     # Loading dataset
     parser.add_argument('--path', type=str, default='/mnt/nvme14/IGB260M', 
         help='path containing the datasets')
-    parser.add_argument('--dataset_size', type=str, default='tiny',
-        choices=['tiny', 'small', 'medium', 'large', 'full'], 
+    parser.add_argument('--dataset_size', type=str, default='experimental',
+        choices=['experimental', 'small', 'medium', 'large', 'full'], 
         help='size of the datasets')
     parser.add_argument('--num_classes', type=int, default=19, 
         choices=[19, 2983, 172], help='number of classes')
@@ -80,6 +85,7 @@ if __name__ == '__main__':
 
     args = parser.parse_args()
 
+    print("start")
 
     labels = None
     device = f'cuda:' + str(args.device) if torch.cuda.is_available() else 'cpu'
@@ -97,5 +103,7 @@ if __name__ == '__main__':
         g=None
         dataset=None
     
-
+    print("Setup done, start graph coloring")
     color_graph(g,args,device)
+
+    print("DONE2")

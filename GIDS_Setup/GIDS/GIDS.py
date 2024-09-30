@@ -5,6 +5,7 @@ import ctypes
 import nvtx 
 
 import BAM_Feature_Store
+from BAM_Feature_Store import Emulate_SA
 
 import dgl
 from torch.utils.data import DataLoader
@@ -42,11 +43,45 @@ class CollateWrapper(object):
         self.pin_memory = True
 
 
+
     def __call__(self, items):
         graph_device = getattr(self.g, 'device', None)   
         items = recursive_apply(items, lambda x: x.to(self.device))
         with nvtx.annotate("Sample", color="green"):
             batch = self.sample_func(self.g, items)
+
+        return batch
+
+
+class Emulate_CollateWrapper(object):
+    def __init__(self, sample_func, g,  device, emul_SA):
+        self.sample_func = sample_func
+        self.g = g
+        self.device = device
+        self.pin_memory = True
+
+        self.Emul_SA = emul_SA
+
+
+    def __call__(self, items):
+        graph_device = getattr(self.g, 'device', None)   
+        items = recursive_apply(items, lambda x: x.to(self.device))
+        with nvtx.annotate("Sample", color="green"):
+            batch = self.sample_func(self.g, items)
+
+        # print("items: ", items)
+        # print("batch: ", batch)
+
+        index_size = len(batch[0])
+        index = batch[0].to(self.device)
+        # print("index size: ", index_size)
+        # print("index: ", batch[0])
+        cache_dim = 1024
+        dim = 1024
+        return_torch =  torch.zeros([index_size, dim], dtype=torch.float, device=self.device)
+
+        self.Emul_SA.read_feature(return_torch.data_ptr(), index.data_ptr(), index_size, dim, cache_dim, 0, 0)                 
+        #print("batch: ", batch)
         return batch
 
 
@@ -91,7 +126,11 @@ class ID_Loader(torch.utils.data.DataLoader):
     def __init__(self, graph, indices, graph_sampler, batch_size, dim, device=None, use_ddp=False,
                  ddp_seed=0, drop_last=False, shuffle=False,
                  use_alternate_streams=None,
-
+                 num_sets = 64,
+                 num_ways = 32,
+                 page_size = 4096,
+                 cudaDevice = 0,
+                 eviction_policy = 0,
                  **kwargs):
 
 
@@ -99,7 +138,11 @@ class ID_Loader(torch.utils.data.DataLoader):
         self.GIDS_Loader = GIDS
         self.dim = dim
 
-        if isinstance(kwargs.get('collate_fn', None), CollateWrapper):
+        self.Emul_SA = Emulate_SA()
+        self.Emul_SA.init_cache(num_sets, num_ways, page_size, cudaDevice, eviction_policy)
+
+
+        if isinstance(kwargs.get('collate_fn', None), Emulate_CollateWrapper):
             assert batch_size is None       # must be None
             # restore attributes
             self.graph = graph
@@ -198,8 +241,8 @@ class ID_Loader(torch.utils.data.DataLoader):
 
         super().__init__(
             self.dataset,
-            collate_fn=CollateWrapper(
-                self.graph_sampler.sample, graph, self.device),
+            collate_fn=Emulate_CollateWrapper(
+                self.graph_sampler.sample, graph, self.device, self.Emul_SA),
             batch_size=None,
             pin_memory=False,
             worker_init_fn=worker_init_fn,
@@ -211,6 +254,10 @@ class ID_Loader(torch.utils.data.DataLoader):
         num_threads = torch.get_num_threads() if self.num_workers > 0 else None
         return _ID_PrefetchingIter(
             self, super().__iter__())
+
+    def print_counters(self):
+        self.Emul_SA.print_counters()
+
 
 class GIDS_DGLDataLoader(torch.utils.data.DataLoader):
 

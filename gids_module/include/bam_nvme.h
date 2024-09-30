@@ -24,6 +24,7 @@
 #include <queue.h>
 
 #include "set_associative_page_cache.h"
+#include "emulate_set_associative_page_cache.h"
 
 
 //#define TYPE float
@@ -212,6 +213,18 @@ struct BAM_Feature_Store {
   void create_static_info_buffer(const std::string& path);
 
 };
+
+
+struct Emulate_SA {
+  Emulate_SA_handle<float>* Emul_SA_handle;
+  Emulate_SA_cache_d_t<float>* Emul_cache_ptr;
+
+  void init_cache(uint64_t num_sets, uint64_t num_ways, uint64_t page_size, uint32_t cudaDevice, uint8_t eviction_policy);
+  void read_feature(uint64_t, uint64_t,int64_t , int , int , uint64_t , uint64_t );
+  void print_counters();
+};
+
+
 
 
 #endif

@@ -18,6 +18,7 @@
 #include "gids_kernel.cu"
 
 #include "set_associative_page_cache.h"
+#include "emulate_set_associative_page_cache.h"
 //#include <bafs_ptr.h>
 
 
@@ -1151,6 +1152,40 @@ void BAM_Feature_Store<TYPE>::print_victim_buffer_data(uint64_t offset, uint64_t
   return;
 }
 
+
+void Emulate_SA::read_feature(uint64_t i_ptr, uint64_t i_index_ptr,
+		                                     int64_t num_index, int dim, int cache_dim, uint64_t key_off, uint64_t i_static_info_ptr) {
+
+	                                 
+	  float *tensor_ptr = (float *)i_ptr;
+	    int64_t *index_ptr = (int64_t *)i_index_ptr;
+	      uint8_t* static_info_ptr = (uint8_t*) i_static_info_ptr;
+
+	        uint64_t b_size = 128;
+		  uint64_t n_warp = b_size / 32;
+		    uint64_t g_size = (num_index+n_warp - 1) / n_warp;
+
+		      cuda_err_chk(cudaDeviceSynchronize());
+		        auto t1 = Clock::now();
+
+			  Emulate_SA_read_feature_kernel<float><<<g_size, b_size>>>(Emul_cache_ptr, tensor_ptr,
+					                                                  index_ptr, dim, num_index, cache_dim, key_off, static_info_ptr);
+
+}
+
+void Emulate_SA::init_cache(uint64_t num_sets, uint64_t num_ways, uint64_t page_size, uint32_t cudaDevice, uint8_t eviction_policy){
+
+	  Emul_SA_handle = new Emulate_SA_handle<float>(num_sets, num_ways, page_size, cudaDevice, eviction_policy);
+	    Emul_cache_ptr = Emul_SA_handle -> get_ptr();
+
+}
+
+void Emulate_SA::print_counters(){
+  printf("Printing Cache Counters\n");
+  //Emul_SA_handle -> print_counters();
+  Emulate_SA_print_counters<<<1,1>>>(Emul_cache_ptr);
+}
+
 PYBIND11_MODULE(BAM_Feature_Store, m) {
   m.doc() = "Python bindings for an example library";
 
@@ -1283,8 +1318,19 @@ PYBIND11_MODULE(BAM_Feature_Store, m) {
       .def(py::init<>())
       .def("init_GIDS_controllers", &GIDS_Controllers::init_GIDS_controllers);
 
+
+      py::class_<Emulate_SA>(m, "Emulate_SA")
+      .def(py::init<>())
+      .def("init_cache", &Emulate_SA::init_cache)
+      .def("print_counters", &Emulate_SA::print_counters)
+ 			.def("read_feature", &Emulate_SA::read_feature);
+
 }
 
+
+
 //gids
+
+
 
 

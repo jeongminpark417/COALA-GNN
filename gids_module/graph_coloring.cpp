@@ -2,13 +2,16 @@
 #include <graph_coloring.h>
 
 void Graph_Coloring::cpu_sample_nodes(){
+    printf("sample nodes: %i\n", num_nodes);
     for (uint64_t i = 0; i < num_nodes; i++){
         //If the node does not have a color
+
         if(color_buf[i] == 0) {
             float samp = static_cast<float>(rand()) / RAND_MAX;
             if (samp <= global_sampling_rate){
                 bfs_buffers[0].push_back(std::make_pair(i, color_counter)); // (Node, Color) pair
                 color_counter++;
+              //  printf("num nodes: %i global sampling rate: %f\n", color_counter, global_sampling_rate);
             }
         }
     }
@@ -37,7 +40,10 @@ void Graph_Coloring::cpu_flush_buffer(int buffer_id){
 void Graph_Coloring::cpu_color_graph(){
 
     // First pick sample nodes
+    printf("CPU color graph color_count:%i \n", color_counter);
     cpu_sample_nodes();
+    printf("CPU color graph after sampling color_count:%i global_max hop: %i \n", color_counter, global_max_hop);
+
     int hop = 0;
     for(; hop < global_max_hop; hop++){
         int cur_buffer_id = hop % 2;
@@ -137,6 +143,20 @@ uint64_t Graph_Coloring::get_num_color_node(){
 Graph_Coloring::Graph_Coloring(uint64_t n_nodes){
 	num_nodes = n_nodes;
 }
+
+Graph_Coloring::~Graph_Coloring() {
+    printf("Destructing Graph Coloring Strucutre\n");
+    for (int i = 0; i < 2; ++i) {
+        bfs_buffers[i].clear();
+        std::vector<std::pair<uint64_t, uint64_t>>().swap(bfs_buffers[i]);
+    }
+
+    // Clear and release memory for `color_connectivity_map`
+    color_connectivity_map.clear();
+    std::unordered_map<uint64_t, std::unordered_map<uint64_t, uint64_t>>().swap(color_connectivity_map);
+
+}
+
 
 PYBIND11_MODULE(Graph_Coloring, m) {
   m.doc() = "Graph Coloring Libraray";

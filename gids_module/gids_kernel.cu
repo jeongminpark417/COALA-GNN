@@ -433,3 +433,32 @@ print_kernel(SA_cache_d_t<T> *cache, bool debug_mode, unsigned long long*  evict
 
   }
 }
+
+
+
+template <typename T = float>
+__global__ void Emulate_SA_read_feature_kernel(Emulate_SA_cache_d_t<T> *cache, T *out_tensor_ptr,
+                                    int64_t *index_ptr, int dim,
+                                    int64_t num_idx, int cache_dim, uint64_t key_off,  uint8_t* static_info_ptr) {
+
+  uint64_t bid = blockIdx.x;
+  int num_warps = blockDim.x / 32;
+  int warp_id = threadIdx.x / 32;
+  int idx_idx = bid * num_warps + warp_id;
+  if (idx_idx < num_idx) {
+    uint64_t row_index = index_ptr[idx_idx] + key_off;
+    uint64_t tid = threadIdx.x % 32;
+   // cache->get_data(0, out_tensor_ptr, idx_idx, static_info_ptr);
+
+    cache->get_data(row_index, out_tensor_ptr + (bid * num_warps + warp_id) * dim, idx_idx, static_info_ptr);
+  } 
+}
+
+template <typename T = float>
+__global__ void Emulate_SA_print_counters(Emulate_SA_cache_d_t<T> *cache){
+  if(threadIdx.x == 0 && blockIdx.x == 0)
+    cache -> print_stats();
+
+  __syncthreads();
+
+}
