@@ -11,7 +11,7 @@ from GIDS import ID_Loader
 
 #from custom_neighbor import sample_neighbors2
 
-from dataloader import IGB260MDGLDataset, OGBDGLDataset
+from dataloader import IGB260MDGLDataset, OGBDGLDataset, load_ogb
 
 #from custom_sampler import NeighborSampler2
 
@@ -61,6 +61,17 @@ if __name__ == '__main__':
     parser.add_argument('--batch_size', type=int, default=32)
     parser.add_argument('--num_workers', type=int, default=0)
 
+    parser.add_argument('--dist', type=str, default='baseline')
+    parser.add_argument('--num_parts', type=int, default=2)
+    parser.add_argument('--cache_percent', type=float, default=1.0)
+
+
+
+    parser.add_argument('--color_path', type=str, default='./',
+    help='path containing the datasets')
+    parser.add_argument('--eviction_policy', type=int, default=0)
+
+
 
     args = parser.parse_args()
     
@@ -73,8 +84,12 @@ if __name__ == '__main__':
         g = dataset[0]
 
     elif(args.data == 'OGB'):
-        dataset = OGBDGLDataset(args)
-        g = dataset[0]
+        print("Dataset: OGB")
+        # dataset = OGBDGLDataset(args)
+        # g = dataset[0]
+        # g  = g.formats('csc')
+
+        g, labels = load_ogb("ogbn-papers100M", args.path)
     g.ndata['features'] = g.ndata['feat']
     g.ndata['labels'] = g.ndata['label']
 
@@ -99,25 +114,40 @@ if __name__ == '__main__':
     # print("filtered train nid size: ", len(filtered_train_nid))
 
     #train_nid = filtered_train_nid
+
+    num_nodes = g.number_of_nodes()
+
+    color_tensor = torch.load(args.color_path + "color.pt")
+    color_topk = torch.load(args.color_path + "topk.pt")
+    static_info_tensor = torch.load(args.color_path + "static_info.pt")
+
+    num_ways = 32
+    num_sets = int(num_nodes * args.cache_percent / args.num_parts / num_ways)
+    print("Number of Sets: ", num_sets)
+
     dim = in_feats
     train_dataloader = ID_Loader(
         g,
         train_nid,
         sampler,
-        batch_size=args.batch_size,
+        batch_size=args.batch_size * args.num_parts,
         shuffle=True,
         dim = dim,
         device=device,
-        num_sets = 50000,
+        num_sets = num_sets,
         #num_sets = 16,
-        num_ways = 1
-
+        num_ways = num_ways,
+        color_tensor = color_tensor,
+        color_topk = color_topk,
+        num_gpus = args.num_parts,
+        distribute_method = args.dist,
+        static_info_tensor = static_info_tensor,
+        eviction_policy = args.eviction_policy
     )
 
-    num_nodes = g.number_of_nodes()
     access_count_tensor = torch.zeros(num_nodes)
     print("num nodes: ", num_nodes)
-    
+    print("Dim: ", dim)
 
 
     dictionary_time = 0
@@ -127,6 +157,9 @@ if __name__ == '__main__':
     for i in range(2):
         num_accesses = 0
         for step, (input_nodes, seeds, blocks) in enumerate(train_dataloader):
+            if(step % 100 == 0):
+                print("step: ", step)
+            #     break
             num_accesses += len(input_nodes)
             # for node_tensor in input_nodes:
             #     node = node_tensor.item()
@@ -143,8 +176,8 @@ if __name__ == '__main__':
             #         #print("not in partition")
             #     dict_end = time.time()
             #     dictionary_time += (dict_end - dict_start)
-            if(step <= 3):
-                print("step: ", step)
+            # if(step <= 3):
+            #     print("step: ", step)
             # break
         print("Print Counters")
         train_dataloader.print_counters()

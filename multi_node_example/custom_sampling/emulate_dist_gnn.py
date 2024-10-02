@@ -79,7 +79,7 @@ if __name__ == '__main__':
     g.ndata['labels'] = g.ndata['label']
 
     
-    lib = ctypes.CDLL('/root/Distributed-GIDS/multi_node_evaluation/custom_sampling/libexample.so', mode=ctypes.RTLD_GLOBAL)
+  #  lib = ctypes.CDLL('/root/Distributed-GIDS/multi_node_evaluation/custom_sampling/libexample.so', mode=ctypes.RTLD_GLOBAL)
 #    sampler = NeighborSampler2([int(fanout) for fanout in args.fan_out.split(',')], hot_nodes=hot_nodes_tensor)
     sampler = dgl.dataloading.MultiLayerNeighborSampler([int(fanout) for fanout in args.fan_out.split(',')])
     

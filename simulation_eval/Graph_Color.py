@@ -8,12 +8,13 @@ from models import *
 from dataloader import IGB260MDGLDataset
 from Dist_GIDS_Loader import Simulation_Loader
 from Graph_Coloring import Graph_Coloring
+from dataloader import load_ogb_graph
 
 def color_graph(g, args, device):
     dim = args.emb_size
 
-    g.ndata['features'] = g.ndata['feat']
-    g.ndata['labels'] = g.ndata['label']
+    # g.ndata['features'] = g.ndata['feat']
+    # g.ndata['labels'] = g.ndata['label']
     
     
     num_nodes = g.number_of_nodes()
@@ -44,8 +45,11 @@ def color_graph(g, args, device):
     topk_color_tensor =  torch.zeros(num_colors * args.topk, dtype=torch.int64).contiguous()
     
     Grah_Coloring_Tool.set_topk_color_buffer(topk_color_tensor.data_ptr())
-    print("count nearest colors")
-    Grah_Coloring_Tool.cpu_count_nearest_color()
+    # print("count nearest colors")
+    # Grah_Coloring_Tool.cpu_count_nearest_color()
+
+    print("count nearest colors with less memory")
+    Grah_Coloring_Tool.cpu_count_nearest_color_less_memory()
 
     del Grah_Coloring_Tool
     print("saving torch")
@@ -96,9 +100,12 @@ if __name__ == '__main__':
         g  = g.formats('csc')
     elif(args.data == "OGB"):
         print("Dataset: OGB")
-        dataset = OGBDGLDataset(args)
-        g = dataset[0]
-        g  = g.formats('csc')
+        # dataset = OGBDGLDataset(args)
+        # g = dataset[0]
+        # g  = g.formats('csc')
+
+        g, labels = load_ogb_graph("ogbn-papers100M", args.path)
+
     else:
         g=None
         dataset=None

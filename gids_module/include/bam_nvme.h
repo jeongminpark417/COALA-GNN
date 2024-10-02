@@ -219,9 +219,11 @@ struct Emulate_SA {
   Emulate_SA_handle<float>* Emul_SA_handle;
   Emulate_SA_cache_d_t<float>* Emul_cache_ptr;
 
-  void init_cache(uint64_t num_sets, uint64_t num_ways, uint64_t page_size, uint32_t cudaDevice, uint8_t eviction_policy);
+  void init_cache(uint64_t num_sets, uint64_t num_ways, uint64_t page_size, uint32_t cudaDevice, uint8_t eviction_policy, int, uint64_t);
   void read_feature(uint64_t, uint64_t,int64_t , int , int , uint64_t , uint64_t );
+  void read_feature_with_color(uint64_t, uint64_t,int64_t , int , int , uint64_t , uint64_t, uint64_t);
   void print_counters();
+  float color_score(uint64_t);
 };
 
 

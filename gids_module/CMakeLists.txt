@@ -53,6 +53,7 @@ FIND_PACKAGE(PythonLibs   3 REQUIRED)
 
 message("Compilation starts")
 
+
 ADD_LIBRARY(BAM_Feature_Store SHARED gids_nvme.cu )
  
   target_include_directories(BAM_Feature_Store PRIVATE ./include ../bam/include ../bam/include/freestanding/include/)

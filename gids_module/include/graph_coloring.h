@@ -26,13 +26,17 @@ struct Graph_Coloring {
     void cpu_color_neighbors_csc(int, uint64_t, uint64_t);
     void cpu_flush_buffer(int);
     void cpu_count_nearest_color();
-
+    void cpu_count_nearest_color_less_memory();
+    
     void set_color_buffer(uint64_t);
     void set_topk_color_buffer(uint64_t);
     void set_adj_csc(uint64_t, uint64_t);
 
     uint64_t get_num_color();
     uint64_t get_num_color_node();
+
+
+
 
     uint64_t* color_buf = nullptr;
     uint64_t* topk_color_buf = nullptr; //(color x topk)
