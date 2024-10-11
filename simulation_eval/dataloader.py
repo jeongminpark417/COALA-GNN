@@ -202,6 +202,80 @@ class IGB260MDGLDataset(DGLDataset):
         return len(self.graphs)
 
 
+class IGB260MDGLDataset_No_Feature(DGLDataset):
+    def __init__(self, args):
+        self.dir = args.path
+        self.args = args
+        super().__init__(name='IGB260M')
+
+    def process(self):
+        dataset = IGB260M(root=self.dir, size=self.args.dataset_size, in_memory=self.args.in_memory, uva_graph=self.args.uva_graph, \
+            classes=self.args.num_classes, synthetic=self.args.synthetic, emb_size=self.args.emb_size, data=self.args.data)
+
+        #node_features = torch.from_numpy(dataset.paper_feat)
+        node_edges = torch.from_numpy(dataset.paper_edge)
+        node_labels = torch.from_numpy(dataset.paper_label).to(torch.long)
+
+      
+        n_nodes = dataset.num_nodes()
+        print("Number of Nodes: ", n_nodes)
+        self.graph = dgl.graph((node_edges[:, 0],node_edges[:, 1]), num_nodes=n_nodes)
+      
+        #self.graph.ndata['feat'] = node_features
+        
+
+        self.graph.ndata['label'] = node_labels
+
+        if self.args.dataset_size != 'full':
+            self.graph = dgl.remove_self_loop(self.graph)
+            self.graph = dgl.add_self_loop(self.graph)
+        print("self graph3: ", self.graph.formats())
+        
+        if self.args.dataset_size == 'full':
+            #TODO: Put this is a meta.pt file
+            if self.args.num_classes == 19:
+                n_labeled_idx = 227130858
+            else:
+                n_labeled_idx = 157675969
+
+            #n_nodes = node_features.shape[0]
+            n_train = int(n_labeled_idx * 0.6)
+            n_val   = int(n_labeled_idx * 0.2)
+            print("self graph4: ", self.graph.formats())    
+            train_mask = torch.zeros(n_nodes, dtype=torch.bool)
+            val_mask = torch.zeros(n_nodes, dtype=torch.bool)
+            test_mask = torch.zeros(n_nodes, dtype=torch.bool)
+            
+            train_mask[:n_train] = True
+            val_mask[n_train:n_train + n_val] = True
+            test_mask[n_train + n_val:n_labeled_idx] = True
+            print("self graph5: ", self.graph.formats())
+            self.graph.ndata['train_mask'] = train_mask
+            self.graph.ndata['val_mask'] = val_mask
+            self.graph.ndata['test_mask'] = test_mask
+        else:
+            #n_nodes = node_features.shape[0]
+            n_train = int(n_nodes * 0.6)
+            n_val   = int(n_nodes * 0.2)
+            
+            train_mask = torch.zeros(n_nodes, dtype=torch.bool)
+            val_mask = torch.zeros(n_nodes, dtype=torch.bool)
+            test_mask = torch.zeros(n_nodes, dtype=torch.bool)
+            
+            train_mask[:n_train] = True
+            val_mask[n_train:n_train + n_val] = True
+            test_mask[n_train + n_val:] = True
+            
+            self.graph.ndata['train_mask'] = train_mask
+            self.graph.ndata['val_mask'] = val_mask
+            self.graph.ndata['test_mask'] = test_mask
+        
+    def __getitem__(self, i):
+        return self.graph
+
+    def __len__(self):
+        return len(self.graphs)
+
 class SharedIGB260MDGLDataset(DGLDataset):
     def __init__(self, args):
         self.dir = args.path

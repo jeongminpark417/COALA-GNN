@@ -69,16 +69,35 @@ class Emulate_CollateWrapper(object):
         self.cache_dim = cache_dim
         self.eviction_policy = ep
 
+
+
     def __call__(self, items):
         graph_device = getattr(self.g, 'device', None)   
         items = recursive_apply(items, lambda x: x.to(self.device))
 
 
+        distribute_time_start = time.time()
+
         if(self.distribute_method == "baseline"):
             item_list = self.baseline_distribute(items)
         # Leverage Training node color
-        elif(self.distribute_method == "graph_color"):
-            item_list = self.distribute_node(items)
+        elif(self.distribute_method == "graph_color" or self.distribute_method == "graph_color_layer"):
+            item_list = self.GPU_distribute_node(items)
+            # item_list = self.distribute_node(items)
+            # item_list2 = self.GPU_distribute_node(items)
+
+            # print("items: ", items)
+            # print("item_list: ", item_list)
+            # print("item_list2: ", item_list2)
+
+            # overlap_mask = torch.isin(item_list[0], item_list2[0])
+            # num_overlap = overlap_mask.sum().item()
+
+            # print(f"Number of overlapping elements: {num_overlap}")
+            # overlap_mask = torch.isin(item_list[0], item_list2[1])
+            # num_overlap = overlap_mask.sum().item()
+            # print(f"Number of NOT overlapping elements: {num_overlap}")
+
         # Leverage Cache status
         elif(self.distribute_method == "cache_meta"):
 
@@ -86,10 +105,16 @@ class Emulate_CollateWrapper(object):
         else:
             item_list = self.baseline_distribute(items)
 
+        self.cache_track.distribute_time += (time.time() - distribute_time_start)
 
+        sample_time_start = time.time()
         with nvtx.annotate("Sample", color="green"):
             #batch =  self.sample_func(self.g, items)
             batch = self.sample_func(self.g, item_list[0])
+        
+        self.cache_track.sample_time += (time.time() - sample_time_start)
+
+        fetch_time_start = time.time()
 
         index_size = len(batch[0])
         index = batch[0].to(self.device)
@@ -104,6 +129,8 @@ class Emulate_CollateWrapper(object):
             self.Emul_SA.read_feature(return_torch.data_ptr(), index.data_ptr(), index_size, self.dim, self.cache_dim, 0, 0)                 
 
         #print("batch: ", batch)
+        self.cache_track.fetch_time += (time.time() - fetch_time_start)
+
         return batch
 
     def get_static_info(self, index):
@@ -142,7 +169,16 @@ class Emulate_CollateWrapper(object):
 
     def baseline_distribute(self, items):
         N = self.cache_track.num_gpus
-        result = [items[i::N] for i in range(N)]
+        #result = [items[i::N] for i in range(N)]
+        def chunk_items(items, N):
+            chunk_size = len(items) // N
+            result = [items[i*chunk_size:(i+1)*chunk_size] for i in range(N)]
+            return result
+
+        result = chunk_items(items, N)
+
+       # result = [items[i:i+N] for i in range(0, len(items), N)]
+
         return result
 
     def distribute_node(self, items):
@@ -158,7 +194,7 @@ class Emulate_CollateWrapper(object):
             nvlink_idx, node_color = self.score_node(node, nvlink_batch_size, distributed_items )
             distributed_items[nvlink_idx].append(node)
 
-            if (node_color != 0 and (self.distribute_method != "cache_meta")):
+            if (node_color != 0 and (self.distribute_method == "graph_color" or self.distribute_method == "graph_color_layer" )):
                 if node_color in self.cache_track.cache_track[nvlink_idx]:
                     self.cache_track.cache_track[nvlink_idx][node_color] += 1
                 else:
@@ -166,13 +202,36 @@ class Emulate_CollateWrapper(object):
 
             #print("Dict: ", self.cache_track.cache_track)
 
-
         distributed_tensors = []
         for i in range(self.cache_track.num_gpus):
             distributed_tensors.append(torch.tensor(distributed_items[i], device=self.device))
         return distributed_tensors
 
+
+    def GPU_distribute_node(self, items):
+        nvlink_batch_size = int(len(items) / self.cache_track.num_gpus)
+        dist_list_ten = torch.zeros([self.cache_track.num_gpus, nvlink_batch_size], dtype=items.dtype, device=self.device)
+        
+        #print("itmes: ", items)
+        item_colors = self.cache_track.gpu_color_tensor[items]
+        
+        score_ten = torch.zeros([self.cache_track.num_gpus, len(items)], dtype=torch.float32, device=self.device)
+
+        for i in range(self.cache_track.num_gpus):
+            score_ten[i] =  self.cache_track.gpu_color_dict[i][item_colors]
+
+        #print("score ten: ", score_ten)
+
+        #print("number of gpus; ", self.cache_track.num_gpus)
+        counter_ten = torch.zeros([self.cache_track.num_gpus], dtype=torch.int32, device=self.device)
+
+        self.Emul_SA.distribute_node(items.data_ptr(), score_ten.data_ptr(), dist_list_ten.data_ptr(), counter_ten.data_ptr(),  self.cache_track.gpu_color_dict.data_ptr(),  item_colors.data_ptr(), len(items), self.cache_track.num_gpus, self.cache_track.num_colors)
+        #print("dist list ten: ", dist_list_ten)
+        return dist_list_ten
+
     def score_node(self, node, batch_size, distributed_items):
+
+        score_time_start = time.time()
         score_tensor = torch.zeros(self.cache_track.num_gpus, dtype=torch.float32)
         color_ten = []
         for nvlink_idx in range(self.cache_track.num_gpus):
@@ -187,16 +246,34 @@ class Emulate_CollateWrapper(object):
                     if(self.distribute_method == "cache_meta"):
                         n_score = self.Emul_SA_list[nvlink_idx].color_score(node_color)
                         current_score += n_score
-                    else:
+                    elif (self.distribute_method == "graph_color_layer"):
                         if node_color in self.cache_track.cache_track[nvlink_idx]:
                             current_score += self.cache_track.cache_track[nvlink_idx][node_color]
-                            #print("new score: ", current_score)
+                        
+                        topk_colors = self.cache_track.color_topk[node_color]
+                        neighbor_score = 0.0
+                        for neigh_color in topk_colors:
+                            n_color = neigh_color.item()
+                            neighbor_score += self.cache_track.cache_track[nvlink_idx][n_color]
+
+                        current_score += neighbor_score / self.cache_track.topk
+                        
+
+
+
+                    elif (self.distribute_method == "graph_color"):
+                        if node_color in self.cache_track.cache_track[nvlink_idx]:
+                            current_score += self.cache_track.cache_track[nvlink_idx][node_color]
+                    
                 
                 # Need to add adj color matrix
                 score_tensor[nvlink_idx] = current_score
                 color_ten.append(node_color)
         #print(score_tensor)
         max_idx = torch.argmax(score_tensor)
+
+        self.cache_track.score_time += (time.time() - score_time_start)
+
         return max_idx, color_ten[max_idx]
 
 
@@ -237,20 +314,38 @@ class _ID_PrefetchingIter(object):
 
 
 class Cache_Tracker():
-    def __init__(self, color_tensor, color_topk, num_gpus):
+    def __init__(self, color_tensor, color_topk, num_gpus, device):
         self.num_gpus = num_gpus
         self.color_tensor = color_tensor
         self.num_colors = color_topk.shape[0]
         self.color_topk = color_topk
         self.cache_track = []
         self.static_info = None
+        self.topk = color_topk.shape[1]
+        self.device = device
 
         for i in range(num_gpus):
             self.cache_track.append({})
 
+        self.distribute_time = 0.0
+        self.sample_time = 0.0 
+        self.fetch_time = 0.0
+        self.score_time = 0.0
+
+        #GPU version
+        self.gpu_color_tensor = color_tensor.to(self.device)
+        self.gpu_color_dict =  torch.zeros([self.num_gpus, self.num_colors+1], dtype=torch.float32, device=self.device).contiguous()
+        print("GPU color dict shape: ", self.gpu_color_dict.shape)
+
     def set_static_info(self, static_info_tensor):
         self.static_info = static_info_tensor
 
+    def print_dist_time(self):
+        print(f"Distribut time: {self.distribute_time}  Sample Time: {self.sample_time}  Fetch Time: {self.fetch_time} Score Time: {self.score_time}")
+        self.distribute_time = 0.0
+        self.sample_time = 0.0 
+        self.fetch_time = 0.0
+        self.score_time = 0.0
 
 class ID_Loader(torch.utils.data.DataLoader):
     def __init__(self, graph, indices, graph_sampler, batch_size, dim, device=None, use_ddp=False,
@@ -273,7 +368,11 @@ class ID_Loader(torch.utils.data.DataLoader):
         use_uva = False
         self.GIDS_Loader = GIDS
         self.eviction_policy = eviction_policy
-       
+        
+        if device is None:     
+            device = torch.cuda.current_device()
+        self.device = _get_device(device)
+
         #FIX   
         self.dim = 1024
         self.cache_dim = 1024
@@ -282,9 +381,10 @@ class ID_Loader(torch.utils.data.DataLoader):
 
         self.distribute_method = distribute_method
         self.cache_track = None
+
         if(color_tensor != None and color_topk != None):
             print("init Cache Tracker")
-            self.cache_track = Cache_Tracker(color_tensor, color_topk, num_gpus)
+            self.cache_track = Cache_Tracker(color_tensor, color_topk, num_gpus, self.device)
             if(static_info_tensor is not None):
                 self.cache_track.set_static_info(static_info_tensor)
 
@@ -415,6 +515,9 @@ class ID_Loader(torch.utils.data.DataLoader):
             self.Emul_SA_list[0].print_counters()
         else:
             self.Emul_SA.print_counters()
+
+    def print_dist_time(self):
+        self.cache_track.print_dist_time()
 
 
 class GIDS_DGLDataLoader(torch.utils.data.DataLoader):
@@ -553,6 +656,8 @@ class GIDS_DGLDataLoader(torch.utils.data.DataLoader):
         #print("graph travel time: %f" % self.graph_travel_time)
         self.sample_time = 0.0
         self.graph_travel_time = 0.0
+
+ 
 
 
 class GIDS():
