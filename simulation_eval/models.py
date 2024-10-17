@@ -5,6 +5,60 @@ from dgl.nn.pytorch import GATConv, GraphConv, SAGEConv, HeteroGraphConv
 import dgl.nn.pytorch as dglnn
 
 
+class DistSAGE(nn.Module):
+    """
+    SAGE model for distributed train and evaluation.
+
+    Parameters
+    ----------
+    in_feats : int
+        Feature dimension.
+    n_hidden : int
+        Hidden layer dimension.
+    n_classes : int
+        Number of classes.
+    n_layers : int
+        Number of layers.
+    activation : callable
+        Activation function.
+    dropout : float
+        Dropout value.
+    """
+
+    def __init__(
+        self, in_feats, n_hidden, n_classes, n_layers, activation, dropout=0.2
+    ):
+        super().__init__()
+        self.n_layers = n_layers
+        self.n_hidden = n_hidden
+        self.n_classes = n_classes
+        self.layers = nn.ModuleList()
+        self.layers.append(dglnn.SAGEConv(in_feats, n_hidden, "mean"))
+        for _ in range(1, n_layers - 1):
+            self.layers.append(dglnn.SAGEConv(n_hidden, n_hidden, "mean"))
+        self.layers.append(dglnn.SAGEConv(n_hidden, n_classes, "mean"))
+        self.dropout = nn.Dropout(dropout)
+        self.activation = activation
+
+    def forward(self, blocks, x):
+        """
+        Forward function.
+
+        Parameters
+        ----------
+        blocks : List[DGLBlock]
+            Sampled blocks.
+        x : DistTensor
+            Feature data.
+        """
+        h = x
+        for i, (layer, block) in enumerate(zip(self.layers, blocks)):
+            h = layer(block, h)
+            if i != len(self.layers) - 1:
+                h = self.activation(h)
+                h = self.dropout(h)
+        return h
+
 class SAGE(nn.Module):
     def __init__(self, in_feats, h_feats, num_classes, num_layers=2, dropout=0.2):
         super(SAGE, self).__init__()

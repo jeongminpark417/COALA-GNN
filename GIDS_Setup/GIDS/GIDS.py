@@ -5,7 +5,11 @@ import ctypes
 import nvtx 
 
 import BAM_Feature_Store
-from BAM_Feature_Store import Emulate_SA
+#from BAM_Feature_Store import Emulate_SA as Emulate_Cache
+
+import Dist_Cache
+from Dist_Cache import Emulate_Cache
+
 
 import dgl
 from torch.utils.data import DataLoader
@@ -54,11 +58,13 @@ class CollateWrapper(object):
 
 
 class Emulate_CollateWrapper(object):
-    def __init__(self, sample_func, g,  device, emul_SA, emul_SA_list, dim, cache_dim, ep, cache_track, distribute_method):
+    def __init__(self, sample_func, g,  device, emul_SA, emul_SA_list, dim, cache_dim, ep, cache_track, distribute_method, reset_time):
         self.sample_func = sample_func
         self.g = g
         self.device = device
         self.pin_memory = True
+
+        print("Emulate Collate Wrapper device: ", self.device)
 
         self.Emul_SA = emul_SA
         self.Emul_SA_list = emul_SA_list
@@ -69,6 +75,12 @@ class Emulate_CollateWrapper(object):
         self.cache_dim = cache_dim
         self.eviction_policy = ep
 
+        self.time_counter = 0
+        self.cache_meta_list = []
+        self.cache_meta_ptr_list = []
+        self.reset_time = reset_time
+
+        print("reset time: ", self.reset_time)
 
 
     def __call__(self, items):
@@ -82,8 +94,8 @@ class Emulate_CollateWrapper(object):
             item_list = self.baseline_distribute(items)
         # Leverage Training node color
         elif(self.distribute_method == "graph_color" or self.distribute_method == "graph_color_layer"):
-            item_list = self.GPU_distribute_node(items)
-            # item_list = self.distribute_node(items)
+            #item_list = self.GPU_distribute_node(items)
+            item_list = self.distribute_node(items)
             # item_list2 = self.GPU_distribute_node(items)
 
             # print("items: ", items)
@@ -99,8 +111,10 @@ class Emulate_CollateWrapper(object):
             # print(f"Number of NOT overlapping elements: {num_overlap}")
 
         # Leverage Cache status
+        elif(self.distribute_method == "cache_meta_interval" or self.distribute_method == "cache_meta_affinity"):
+            return self.cache_distribute(items)
         elif(self.distribute_method == "cache_meta"):
-
+            #return cache_distribute(items)
             return self.call_cache_meta(items)
         else:
             item_list = self.baseline_distribute(items)
@@ -139,6 +153,89 @@ class Emulate_CollateWrapper(object):
         static_info_tensor = static_info_tensor_cpu.to('cuda:0')
         return static_info_tensor
 
+    def cache_distribute(self, items):
+        if (self.time_counter == 0):
+            nccl_start_time = time.time()
+            self.cache_meta_list = []
+            self.cache_meta_ptr_list = []
+            for i in range(self.cache_track.num_gpus):
+                # Copy cache meta
+                tensor = torch.zeros(self.cache_track.num_colors, dtype=torch.int32).contiguous()
+                self.Emul_SA_list[i].copy_meta(tensor.data_ptr())
+                self.cache_meta_list.append(tensor)
+                self.cache_meta_ptr_list.append(tensor.data_ptr())
+
+                s = torch.sum(tensor)
+              #  print(f"IDX: {i}, Sum: {s}")
+                #non_zero_indices = torch.nonzero(tensor, as_tuple=True)[0]
+                #print(f"IDX: {i} Indices with non-zero values: {non_zero_indices}")
+            self.cache_track.nccl_transfer_time += (time.time() - nccl_start_time)
+        
+        nvlink_batch_size = int(len(items) / self.cache_track.num_gpus)
+        item_list = []
+        distributed_items_ptr = []
+        for i in range(self.cache_track.num_gpus):
+            tensor = torch.zeros(nvlink_batch_size, dtype=torch.int64).contiguous()
+            item_list.append(tensor)
+            distributed_items_ptr.append(tensor.data_ptr())
+
+        cpu_items = items.to("cpu")
+
+        index_color_cpu = self.cache_track.color_tensor[cpu_items]
+        score_time_start = time.time()
+
+        if(self.distribute_method == "cache_meta_interval"):
+            self.Emul_SA_list[0].distribute_node_with_cache_meta(cpu_items.data_ptr(), index_color_cpu.data_ptr(), distributed_items_ptr, self.cache_meta_ptr_list, nvlink_batch_size, self.cache_track.num_gpus)
+        else:
+            self.Emul_SA_list[0].distribute_node_with_affinity(cpu_items.data_ptr(), index_color_cpu.data_ptr(), distributed_items_ptr, self.cache_meta_ptr_list, self.cache_track.color_topk.data_ptr(), self.cache_track.color_affinity.data_ptr(), self.cache_track.topk,  nvlink_batch_size, self.cache_track.num_gpus)
+        
+        
+        self.cache_track.score_time += (time.time() - score_time_start)
+
+        # for i in range(self.cache_track.num_gpus):
+        #     print(f"IDX: {i} item list: {item_list[i]}")
+
+        
+        for i in range(self.cache_track.num_gpus):
+            sample_time_start = time.time()
+            cur_list = item_list[i].to("cuda:0")
+            batch = self.sample_func(self.g, cur_list)
+            self.cache_track.sample_time += (time.time() - sample_time_start)
+            #print(f"IDX: {i} sample done")
+
+            if(i == 0):
+                init_batch = batch
+            index_size = len(batch[0])
+            index = batch[0].to(self.device)
+            return_torch =  torch.zeros([index_size, self.dim], dtype=torch.float, device=self.device)
+            color_tensor = torch.zeros([index_size], dtype=torch.int64, device=self.device)
+
+            preprocess_start = time.time()
+            index_cpu = index.cpu()
+            color_tensor_cpu = self.cache_track.color_tensor[index_cpu]
+            color_tensor = color_tensor_cpu.to('cuda:0')
+            self.cache_track.preprocess_time += (time.time() - preprocess_start)
+
+
+            fetch_time_start = time.time()
+            static_info_ten = None
+            if(self.eviction_policy == 1):
+                static_info_ten = self.get_static_info(index)
+                self.Emul_SA_list[i].read_feature_with_color(return_torch.data_ptr(), index.data_ptr(), index_size, self.dim, self.cache_dim, 0, static_info_ten.data_ptr(), color_tensor.data_ptr())                 
+
+            else:
+                self.Emul_SA_list[i].read_feature_with_color(return_torch.data_ptr(), index.data_ptr(), index_size, self.dim, self.cache_dim, 0, 0, color_tensor.data_ptr())                 
+
+            self.cache_track.fetch_time += (time.time() - fetch_time_start)
+
+
+        self.time_counter += 1
+        if(self.time_counter == self.reset_time):
+            self.time_counter = 0
+        return init_batch
+            
+        
+
     def call_cache_meta(self, items):
         
         item_list = self.distribute_node(items)
@@ -164,20 +261,19 @@ class Emulate_CollateWrapper(object):
             else:
                 self.Emul_SA_list[i].read_feature_with_color(return_torch.data_ptr(), index.data_ptr(), index_size, self.dim, self.cache_dim, 0, 0, color_tensor.data_ptr())                 
 
+
         return init_batch
 
 
     def baseline_distribute(self, items):
         N = self.cache_track.num_gpus
-        #result = [items[i::N] for i in range(N)]
-        def chunk_items(items, N):
-            chunk_size = len(items) // N
-            result = [items[i*chunk_size:(i+1)*chunk_size] for i in range(N)]
-            return result
+        result = [items[i::N] for i in range(N)]
+        # def chunk_items(items, N):
+        #     chunk_size = len(items) // N
+        #     result = [items[i*chunk_size:(i+1)*chunk_size] for i in range(N)]
+        #     return result
 
-        result = chunk_items(items, N)
-
-       # result = [items[i:i+N] for i in range(0, len(items), N)]
+        # result = chunk_items(items, N)
 
         return result
 
@@ -256,8 +352,8 @@ class Emulate_CollateWrapper(object):
                             n_color = neigh_color.item()
                             neighbor_score += self.cache_track.cache_track[nvlink_idx][n_color]
 
-                        current_score += neighbor_score / self.cache_track.topk
-                        
+                        #current_score += neighbor_score / self.cache_track.topk
+                        current_score += neighbor_score
 
 
 
@@ -314,7 +410,7 @@ class _ID_PrefetchingIter(object):
 
 
 class Cache_Tracker():
-    def __init__(self, color_tensor, color_topk, num_gpus, device):
+    def __init__(self, color_tensor, color_topk, num_gpus, device, affinity_tensor = None):
         self.num_gpus = num_gpus
         self.color_tensor = color_tensor
         self.num_colors = color_topk.shape[0]
@@ -324,6 +420,8 @@ class Cache_Tracker():
         self.topk = color_topk.shape[1]
         self.device = device
 
+        self.color_affinity = affinity_tensor
+
         for i in range(num_gpus):
             self.cache_track.append({})
 
@@ -332,6 +430,8 @@ class Cache_Tracker():
         self.fetch_time = 0.0
         self.score_time = 0.0
 
+        self.preprocess_time = 0.0
+        self.nccl_transfer_time = 0.0
         #GPU version
         self.gpu_color_tensor = color_tensor.to(self.device)
         self.gpu_color_dict =  torch.zeros([self.num_gpus, self.num_colors+1], dtype=torch.float32, device=self.device).contiguous()
@@ -341,11 +441,13 @@ class Cache_Tracker():
         self.static_info = static_info_tensor
 
     def print_dist_time(self):
-        print(f"Distribut time: {self.distribute_time}  Sample Time: {self.sample_time}  Fetch Time: {self.fetch_time} Score Time: {self.score_time}")
+        print(f"Distribut time: {self.distribute_time}  Sample Time: {self.sample_time}  Fetch Time: {self.fetch_time} Score Time: {self.score_time} Preprocess Time: {self.preprocess_time} NCCL transfer Time: {self.nccl_transfer_time}")
         self.distribute_time = 0.0
         self.sample_time = 0.0 
         self.fetch_time = 0.0
         self.score_time = 0.0
+        self.preprocess_time = 0.0
+        self.nccl_transfer_time = 0.0
 
 class ID_Loader(torch.utils.data.DataLoader):
     def __init__(self, graph, indices, graph_sampler, batch_size, dim, device=None, use_ddp=False,
@@ -362,6 +464,8 @@ class ID_Loader(torch.utils.data.DataLoader):
                  num_gpus = 1,
                  distribute_method = "baseline",
                  static_info_tensor = None,
+                 reset_time = 1,
+                 color_affinity_tensor = None,
                  **kwargs):
 
 
@@ -388,13 +492,17 @@ class ID_Loader(torch.utils.data.DataLoader):
             if(static_info_tensor is not None):
                 self.cache_track.set_static_info(static_info_tensor)
 
-        if(distribute_method == "cache_meta"):
+        if(distribute_method == "cache_meta" or distribute_method == "cache_meta_interval" or  distribute_method == "cache_meta_affinity"):
+            if(distribute_method == "cache_meta_affinity"):
+                assert color_affinity_tensor is not None, "color_affinity_tensor should not be set"
+                self.cache_track.color_affinity = color_affinity_tensor
+
             for i in range(num_gpus):
-                cur_Emul_SA = Emulate_SA()
+                cur_Emul_SA = Emulate_Cache()
                 cur_Emul_SA.init_cache(num_sets, num_ways, page_size, cudaDevice, eviction_policy, 1, self.cache_track.num_colors)
                 self.Emul_SA_list.append(cur_Emul_SA)
         else:
-            self.Emul_SA = Emulate_SA()
+            self.Emul_SA = Emulate_Cache()
             self.Emul_SA.init_cache(num_sets, num_ways, page_size, cudaDevice, eviction_policy, 0, 0)
 
         if isinstance(kwargs.get('collate_fn', None), Emulate_CollateWrapper):
@@ -497,7 +605,7 @@ class ID_Loader(torch.utils.data.DataLoader):
         super().__init__(
             self.dataset,
             collate_fn=Emulate_CollateWrapper(
-                self.graph_sampler.sample, graph, self.device, self.Emul_SA, self.Emul_SA_list, self.dim, self.cache_dim, self.eviction_policy, self.cache_track, distribute_method),
+                self.graph_sampler.sample, graph, self.device, self.Emul_SA, self.Emul_SA_list, self.dim, self.cache_dim, self.eviction_policy, self.cache_track, distribute_method, reset_time),
             batch_size=None,
             pin_memory=False,
             worker_init_fn=worker_init_fn,
@@ -511,7 +619,7 @@ class ID_Loader(torch.utils.data.DataLoader):
             self, super().__iter__())
 
     def print_counters(self):
-        if(self.distribute_method == "cache_meta"):
+        if(self.distribute_method == "cache_meta" or self.distribute_method == "cache_meta_interval" or self.distribute_method == "cache_meta_affinity"):
             self.Emul_SA_list[0].print_counters()
         else:
             self.Emul_SA.print_counters()

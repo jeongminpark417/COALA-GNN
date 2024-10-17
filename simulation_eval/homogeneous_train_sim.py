@@ -1,6 +1,6 @@
 import argparse, datetime
 import dgl
-import sklearn.metrics
+#import sklearn.metrics
 import torch, torch.nn as nn, torch.optim as optim
 import time, tqdm, numpy as np
 

@@ -68,7 +68,11 @@ def track_acc_GIDS( g, args, label_array=None):
         fan_out = [int(fanout) for fanout in args.fan_out.split(',')],
         batch_size = args.batch_size,
         use_nvshmem_tensor = False,
-        nvshmem_test = False
+        nvshmem_test = False,
+        is_simulation = True,
+        feat_file = "/mnt/nvme15/IGB260M/medium/processed/paper/node_feat_memmapped.npy",
+        feat_off = 0
+
     )
 
     rank = GIDS_Loader.get_rank()
@@ -370,14 +374,16 @@ if __name__ == '__main__':
     g.ndata['labels'] = g.ndata['label']
 
     
-
-    print(f"RANK = {os.environ.get('RANK')}")
-    print(f"WORLD_SIZE = {os.environ.get('WORLD_SIZE')}")
-    print(f"MASTER_ADDR = {os.environ.get('MASTER_ADDR')}")
-    print(f"MASTER_PORT = {os.environ.get('MASTER_PORT')}")
+    # comm = MPI.COMM_WORLD
+    # rank = comm.Get_rank()  # Get the rank of the current process
+    # print("rank: ", rank)
+    # print(f"RANK = {os.environ.get('RANK')}")
+    # print(f"WORLD_SIZE = {os.environ.get('WORLD_SIZE')}")
+    # print(f"MASTER_ADDR = {os.environ.get('MASTER_ADDR')}")
+    # print(f"MASTER_PORT = {os.environ.get('MASTER_PORT')}")
 
     os.environ['MASTER_ADDR'] = 'localhost'
-    os.environ['MASTER_PORT'] = '12345'
+    os.environ['MASTER_PORT'] = '12349'
 
 
     # rank = int(os.environ['OMPI_COMM_WORLD_SIZE'])
@@ -392,4 +398,5 @@ if __name__ == '__main__':
     track_acc_GIDS( g, args, labels)
 
     # MPI.Finalize()
+
 

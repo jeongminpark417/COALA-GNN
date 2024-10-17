@@ -11,7 +11,7 @@ from GIDS import ID_Loader
 
 #from custom_neighbor import sample_neighbors2
 
-from dataloader import IGB260MDGLDataset, OGBDGLDataset, load_ogb
+from dataloader import IGB260MDGLDataset, OGBDGLDataset, load_ogb, load_ogb_graph
 
 #from custom_sampler import NeighborSampler2
 
@@ -61,7 +61,8 @@ if __name__ == '__main__':
     parser.add_argument('--batch_size', type=int, default=32)
     parser.add_argument('--num_workers', type=int, default=0)
 
-    parser.add_argument('--dist', type=str, default='baseline')
+    parser.add_argument('--dist', type=str, default='baseline',
+    choices=['baseline', 'graph_color', 'cache_meta', 'graph_color_layer',"cache_meta_interval",  "cache_meta_affinity" ])
     parser.add_argument('--num_parts', type=int, default=2)
     parser.add_argument('--cache_percent', type=float, default=1.0)
 
@@ -70,7 +71,7 @@ if __name__ == '__main__':
     parser.add_argument('--color_path', type=str, default='./',
     help='path containing the datasets')
     parser.add_argument('--eviction_policy', type=int, default=0)
-
+    parser.add_argument('--reset_time', type=int, default=1)
 
 
     args = parser.parse_args()
@@ -78,10 +79,14 @@ if __name__ == '__main__':
 
     device = f'cuda:' + str(args.device) if torch.cuda.is_available() else 'cpu'
     print("device: ", device)
+    in_feats = None
     if(args.data == 'IGB'):
         print("Dataset: IGB")
         dataset = IGB260MDGLDataset(args)
         g = dataset[0]
+        g.ndata['features'] = g.ndata['feat']
+        g.ndata['labels'] = g.ndata['label']
+        in_feats = g.ndata['features'].shape[1]
 
     elif(args.data == 'OGB'):
         print("Dataset: OGB")
@@ -89,9 +94,10 @@ if __name__ == '__main__':
         # g = dataset[0]
         # g  = g.formats('csc')
 
-        g, labels = load_ogb("ogbn-papers100M", args.path)
-    g.ndata['features'] = g.ndata['feat']
-    g.ndata['labels'] = g.ndata['label']
+        #g, labels = load_ogb("ogbn-papers100M", args.path)
+        g, labels = load_ogb_graph("ogbn-papers100M", args.path)
+        in_feats = 128
+
 
     
   #  lib = ctypes.CDLL('/root/Distributed-GIDS/multi_node_evaluation/custom_sampling/libexample.so', mode=ctypes.RTLD_GLOBAL)
@@ -102,8 +108,7 @@ if __name__ == '__main__':
     val_nid = torch.nonzero(g.ndata['val_mask'], as_tuple=True)[0]
     test_nid = torch.nonzero(g.ndata['test_mask'], as_tuple=True)[0]
 
-    in_feats = g.ndata['features'].shape[1]
-
+    
     # patrition_file = '/mnt/nvme15/adj/partition/ogbn_papers100M.adj/part_0'
     # partition_dict = read_graph_file(patrition_file)
     # print("train nid: ", train_nid)
@@ -119,7 +124,10 @@ if __name__ == '__main__':
 
     color_tensor = torch.load(args.color_path + "color.pt")
     color_topk = torch.load(args.color_path + "topk.pt")
+    color_affinity_tensor  = torch.load(args.color_path + "score.pt")
     static_info_tensor = torch.load(args.color_path + "static_info.pt")
+
+    print("color_tensor dtype: ", color_tensor.dtype)
 
     num_ways = 32
     num_sets = int(num_nodes * args.cache_percent / args.num_parts / num_ways)
@@ -130,6 +138,7 @@ if __name__ == '__main__':
         g,
         train_nid,
         sampler,
+        drop_last = True,
         batch_size=args.batch_size * args.num_parts,
         shuffle=True,
         dim = dim,
@@ -142,7 +151,9 @@ if __name__ == '__main__':
         num_gpus = args.num_parts,
         distribute_method = args.dist,
         static_info_tensor = static_info_tensor,
-        eviction_policy = args.eviction_policy
+        eviction_policy = args.eviction_policy,
+        reset_time = args.reset_time,
+        color_affinity_tensor = color_affinity_tensor
     )
 
     access_count_tensor = torch.zeros(num_nodes)
@@ -156,9 +167,16 @@ if __name__ == '__main__':
 
     for i in range(2):
         num_accesses = 0
+        epoch_start = time.time()
         for step, (input_nodes, seeds, blocks) in enumerate(train_dataloader):
-            if(step % 100 == 0):
+            # if(step == 100):
+            #     break
+
+
+            if(step % 20 == 0):
                 print("step: ", step)
+            #     train_dataloader.print_dist_time()
+
             #     break
             num_accesses += len(input_nodes)
             # for node_tensor in input_nodes:
@@ -179,7 +197,10 @@ if __name__ == '__main__':
             # if(step <= 3):
             #     print("step: ", step)
             # break
+        epoch_time = time.time() - epoch_start
+        print("epoch time: ", epoch_time)
         print("Print Counters")
         train_dataloader.print_counters()
+        train_dataloader.print_dist_time()
         print("num accesses: ", num_accesses)
 

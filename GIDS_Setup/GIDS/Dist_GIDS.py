@@ -5,10 +5,11 @@ import ctypes
 import nvtx 
 
 import BAM_Feature_Store
-from BAM_Feature_Store import Emulate_SA
+#from BAM_Feature_Store import Emulate_SA
+
 
 import Dist_Cache
-from Dist_Cache import NVSHMEM_Cache
+from Dist_Cache import NVSHMEM_Cache, Dist_GIDS_Controllers
 
 import dgl
 from torch.utils.data import DataLoader
@@ -35,6 +36,48 @@ from collections import Counter
 import nvshmem_manager
 import cupy as cp
 
+
+class  Emulate_Cache_CollateWrapper(object):
+    def __init__(self, sample_func, g,  device, emul_SA, emul_SA_list, dim, cache_dim, ep, cache_track, distribute_method):
+        self.sample_func = sample_func
+        self.g = g
+        self.device = device
+        self.pin_memory = True
+
+        self.Emul_SA = emul_SA
+        self.Emul_SA_list = emul_SA_list
+        self.cache_track = cache_track
+
+        self.distribute_method = distribute_method
+        self.dim = dim
+        self.cache_dim = cache_dim
+        self.eviction_policy = ep
+
+    def __call__(self, items):
+        item_list = self.distribute_node(items)
+        init_batch = None
+        for i in range(self.cache_track.num_gpus):
+            batch = self.sample_func(self.g, item_list[i])
+            if(i == 0):
+                init_batch = batch
+            index_size = len(batch[0])
+            index = batch[0].to(self.device)
+            return_torch =  torch.zeros([index_size, self.dim], dtype=torch.float, device=self.device)
+            color_tensor = torch.zeros([index_size], dtype=torch.int64, device=self.device)
+
+            index_cpu = index.cpu()
+            color_tensor_cpu = self.cache_track.color_tensor[index_cpu]
+            color_tensor = color_tensor_cpu.to('cuda:0')
+
+            static_info_ten = None
+            if(self.eviction_policy == 1):
+                static_info_ten = self.get_static_info(index)
+                self.Emul_SA_list[i].read_feature_with_color(return_torch.data_ptr(), index.data_ptr(), index_size, self.dim, self.cache_dim, 0, static_info_ten.data_ptr(), color_tensor.data_ptr())                 
+
+            else:
+                self.Emul_SA_list[i].read_feature_with_color(return_torch.data_ptr(), index.data_ptr(), index_size, self.dim, self.cache_dim, 0, 0, color_tensor.data_ptr())                 
+
+        return init_batch
 
 
 class NVShmem_Tensor_Manager(object):
@@ -265,7 +308,9 @@ class GIDS_NVShmem_Loader(torch.utils.data.DataLoader):
 class NVSHMEM_GIDS():
     def __init__(self, page_size=4096, off=0, dim = 1024, cache_dim = 1024, num_ele = 300*1000*1000*1024, 
         num_ssd = 1,  
-        cache_size = 10,  num_ways=4,
+        GPU_cache_size = 10,  
+        CPU_cache_size = 0, 
+        num_ways=32, 
         ctrl_idx=0, 
         heterograph=False,
         heterograph_map=None,
@@ -275,13 +320,20 @@ class NVSHMEM_GIDS():
         heterogeneous = False, 
         hetero_map=None,
         use_nvshmem_tensor = False,
-        nvshmem_test = False):
+        nvshmem_test = False,
+        is_simulation = False,
+        feat_file = "",
+        feat_off = 0):
 
  
         #DDP parameters
         self.use_ddp = use_ddp
         self.use_nvshmem_tensor = use_nvshmem_tensor
 
+
+        self.is_simulation = is_simulation
+        self.feat_file = feat_file
+        self.feat_off = feat_off
         # Flag for NVshme Tensor Micro benchmark
         self.nvshmem_test = nvshmem_test
 
@@ -301,19 +353,21 @@ class NVSHMEM_GIDS():
         self.max_sample_size *= 2
         print("max sample size: ", self.max_sample_size)
 
+        self.cache_per_GPU = 1
+        self.NVSHMEM_Cache.init()
+        self.rank = self.NVSHMEM_Cache.get_rank()
+        self.world_size = self.NVSHMEM_Cache.get_world_size()
+        self.mype_node = self.NVSHMEM_Cache.get_mype_node()
 
         if(self.use_nvshmem_tensor or self.nvshmem_test):
-            self.NVshmem_manager =  nvshmem_manager.NVSHMEMWrapper()
-            # self.NVshmem_manager.init()
-            # self.rank = self.NVshmem_manager.get_rank()
-            # self.world_size = self.NVshmem_manager.get_world_size()
-            # self.mype_node = self.NVshmem_manager.get_mype_node()
+            #self.NVshmem_manager =  nvshmem_manager.NVSHMEMWrapper()
+       
 
-            self.NVSHMEM_Cache.init()
-            self.rank = self.NVSHMEM_Cache.get_rank()
-            self.world_size = self.NVSHMEM_Cache.get_world_size()
-            self.mype_node = self.NVSHMEM_Cache.get_mype_node()
-
+            # self.NVSHMEM_Cache.init()
+            # self.rank = self.NVSHMEM_Cache.get_rank()
+            # self.world_size = self.NVSHMEM_Cache.get_world_size()
+            # self.mype_node = self.NVSHMEM_Cache.get_mype_node()
+            self.cache_per_GPU = self.world_size
             
             nbytes = int(self.max_sample_size * 4 * dim)
             nvshmem_ptr = self.NVSHMEM_Cache.allocate(nbytes) 
@@ -334,14 +388,16 @@ class NVSHMEM_GIDS():
             #self.world_size = 1
             # Micro Benchmark, independent cache with NVShmem memory
             if(self.nvshmem_test):
-                self.world_size = 1
+                #self.world_size = 1
+                self.cache_per_GPU = 1
 
         else:
-            self.NVshmem_manager =  nvshmem_manager.NVSHMEMWrapper()
-            self.NVSHMEM_Cache.init()
-            self.rank = self.NVSHMEM_Cache.get_rank()
+            #self.NVshmem_manager =  nvshmem_manager.NVSHMEMWrapper()
+            #self.NVSHMEM_Cache.init()
+            #self.rank = self.NVSHMEM_Cache.get_rank()
             #self.rank = 0
-            self.world_size = 1
+            self.cache_per_GPU = 1
+            #self.world_size = 1
 
 
         #FIX, jut for test
@@ -361,7 +417,8 @@ class NVSHMEM_GIDS():
         self.page_size = page_size
         self.off = off
         self.num_ele = num_ele
-        self.cache_size = cache_size
+        self.GPU_cache_size = GPU_cache_size
+        self.CPU_cache_size = CPU_cache_size
         self.num_ways = num_ways
         self.num_ssd = num_ssd
 
@@ -376,7 +433,8 @@ class NVSHMEM_GIDS():
         #FIX
         self.gids_device="cuda:" + str(self.rank)
 
-        self.GIDS_controller = BAM_Feature_Store.GIDS_Controllers()
+        #self.GIDS_controller = BAM_Feature_Store.GIDS_Controllers()
+        self.GIDS_controller =  Dist_GIDS_Controllers()
 
 
 
@@ -412,8 +470,8 @@ class NVSHMEM_GIDS():
             self.ssd_list = ssd_list
 
         print("SSD list: ", self.ssd_list, " Device id: ", device_id)
-        self.GIDS_controller.init_GIDS_controllers(self.num_ssd, 1024, 128, self.ssd_list, device_id)
-        self.NVSHMEM_Cache.init_cache(self.GIDS_controller, self.page_size, self.off, self.cache_size, self.world_size, self.num_ele, self.num_ssd, self.num_ways)
+        self.GIDS_controller.init_GIDS_controllers(self.num_ssd, 1024, 128, self.ssd_list, device_id, self.is_simulation)
+        self.NVSHMEM_Cache.init_cache(self.GIDS_controller, self.page_size, self.off, self.GPU_cache_size, self.CPU_cache_size, self.cache_per_GPU, self.num_ele, self.num_ssd, self.num_ways, self.is_simulation, self.feat_file, self.feat_off)
     
     
     #Fetching Data from the SSDs
@@ -503,16 +561,27 @@ class NVSHMEM_GIDS():
         Destructor to clean up and finalize MPI.
         """
         # Check if NVSHMEM_Cache has been initialized to avoid errors
-
-        if hasattr(self, 'NVshmem_manager'):
+        if(self.use_nvshmem_tensor or self.nvshmem_test):
             try:
-                # Call finalize_mpi if NVSHMEM_Cache is initialized
-                self.NVshmem_manager.free(self.NVshmem_tensor_manager.nvshmem_batch_ptr)
-                self.NVshmem_manager.free(self.NVshmem_tensor_manager.nvshmem_index_ptr)
-                self.NVshmem_manager.finalize()
-                print(f"MPI finalized successfully for rank {self.rank}.")
+                self.NVSHMEM_Cache.free(self.NVshmem_tensor_manager.nvshmem_batch_ptr)
+                self.NVSHMEM_Cache.free(self.NVshmem_tensor_manager.nvshmem_index_ptr)
             except Exception as e:
-                print(f"Error during MPI finalization for rank {self.rank}: {e}")
+                print(f"Error during NVShmem Free for rank {self.rank}: {e}")
+
+        try:      
+            self.NVSHMEM_Cache.finalize()
+            print(f"MPI finalized successfully for rank {self.rank}.")
+        except Exception as e:
+            print(f"Error during MPI finalization for rank {self.rank}: {e}")
+        # if hasattr(self, 'NVshmem_manager'):
+        #     try:
+        #         # Call finalize_mpi if NVSHMEM_Cache is initialized
+        #         self.NVshmem_manager.free(self.NVshmem_tensor_manager.nvshmem_batch_ptr)
+        #         self.NVshmem_manager.free(self.NVshmem_tensor_manager.nvshmem_index_ptr)
+                
+        #         print(f"MPI finalized successfully for rank {self.rank}.")
+        #     except Exception as e:
+        #         print(f"Error during MPI finalization for rank {self.rank}: {e}")
 
     
 

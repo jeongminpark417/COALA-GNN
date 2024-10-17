@@ -10,7 +10,7 @@
 #include <cstdint> 
 #include <cstdlib> 
 
-
+#include <iostream>
 
 struct Graph_Coloring {
     uint64_t num_nodes = 0;
@@ -18,28 +18,42 @@ struct Graph_Coloring {
     uint64_t color_counter = 1;
     int step_num = 1;
     int global_max_hop = 10;
-    float global_sampling_rate = 0.01;
+    float global_sampling_rate = 0.005;
 
     int topk = 10;
     void cpu_color_graph();
+    void cpu_color_graph_optimized(uint64_t i_train_node_ptr, uint64_t num_training_nodes);
     void cpu_sample_nodes();
+    void cpu_sample_train_nodes(int64_t* train_node_ptr, uint64_t num_train_nodes);
+   
     void cpu_color_neighbors_csc(int, uint64_t, uint64_t);
-    void cpu_flush_buffer(int);
+    template<bool use_hop_info> 
+    void cpu_flush_buffer(int, int);
     void cpu_count_nearest_color();
     void cpu_count_nearest_color_less_memory();
-    
+    void cpu_calculate_color_affinity();
+
     void set_color_buffer(uint64_t);
     void set_topk_color_buffer(uint64_t);
+    void set_topk_affinity_buffer(uint64_t);
+    
     void set_adj_csc(uint64_t, uint64_t);
 
     uint64_t get_num_color();
     uint64_t get_num_color_node();
+
+    bool is_training_node(uint64_t);
+    void update_sample_node_buffer(int64_t* train_node_ptr, uint64_t num_train_nodes);
 
 
 
 
     uint64_t* color_buf = nullptr;
     uint64_t* topk_color_buf = nullptr; //(color x topk)
+    double* topk_affinity_buf = nullptr; //(color x topk)
+
+    uint16_t* color_hop_buf = nullptr;
+    bool* training_node_buf = nullptr;
 
     //CSC Graph ADJ Matrix
     uint64_t* indptr = nullptr;

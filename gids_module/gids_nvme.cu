@@ -22,14 +22,12 @@
 
 //#include "gids_kernel.cu"
 #include "nvshmem_cache_kernel.cu"
-
-
-
+#include "emual_kernel.cu"
 
 typedef std::chrono::high_resolution_clock Clock;
 
-void GIDS_Controllers::init_GIDS_controllers(uint32_t num_ctrls, uint64_t q_depth, uint64_t num_q, 
-                          const std::vector<int>& ssd_list, uint32_t device){
+void Dist_GIDS_Controllers::init_GIDS_controllers(uint32_t num_ctrls, uint64_t q_depth, uint64_t num_q, 
+                          const std::vector<int>& ssd_list, uint32_t device, bool simulation){
 
   n_ctrls = num_ctrls;
   queueDepth = q_depth;
@@ -37,43 +35,94 @@ void GIDS_Controllers::init_GIDS_controllers(uint32_t num_ctrls, uint64_t q_dept
   cudaDevice = device;
   cudaSetDevice(cudaDevice);
 
-  for (size_t i = 0; i < n_ctrls; i++) {
-    ctrls.push_back(new Controller(ctrls_paths[ssd_list[i]], nvmNamespace, cudaDevice, queueDepth, numQueues));
+  if(simulation == false){
+    for (size_t i = 0; i < n_ctrls; i++) {
+      ctrls.push_back(new Controller(ctrls_paths[ssd_list[i]], nvmNamespace, cudaDevice, queueDepth, numQueues));
+    }
   }
 }
 
 
 
 template <typename TYPE>
-void NVSHMEM_Cache<TYPE>::init_cache(GIDS_Controllers GIDS_ctrl, uint32_t ps, uint64_t read_off, uint64_t cache_size, uint32_t num_gpus, uint64_t num_ele, uint64_t num_ssd, uint64_t ways) {
+void NVSHMEM_Cache<TYPE>::init_cache(Dist_GIDS_Controllers GIDS_ctrl, uint32_t ps, uint64_t read_off, uint64_t gpu_cache_size, uint64_t cpu_cache_size, uint32_t num_gpus, uint64_t num_ele, uint64_t num_ssd, uint64_t n_ways, bool is_simulation,
+                                      const std::string &feat_file, int file_off
+                                     ) {
 
   num_eles = num_ele;
   read_offset = read_off;
   n_ctrls = num_ssd;
   n_gpus = num_gpus;
-  num_ways = ways;
+
+  //num_ways = gpu_ways + cpu_ways;
+  num_ways = n_ways;
 
   page_size = ps;
   dim = ps / sizeof(TYPE);
 
   ctrls = GIDS_ctrl.ctrls;
   cudaDevice = GIDS_ctrl.cudaDevice;
+  
+  simulation = is_simulation;
 
 
   cudaSetDevice(cudaDevice);
 
-  n_pages = cache_size * 1024LL*1024/page_size;
+  gpu_ways = (gpu_cache_size * n_ways) / (gpu_cache_size + cpu_cache_size);
+  cpu_ways = num_ways - gpu_ways;
+
+  n_pages = (gpu_cache_size + cpu_cache_size) * 1024LL*1024/page_size;
 
 
   std::cout << "n pages: " << (int)(this->n_pages) <<std::endl;
   std::cout << "page size: " << (int)(this->page_size) << std::endl;
   std::cout << "num elements: " << this->num_eles << std::endl;
   std::cout << "cudaDevice" << cudaDevice  << std::endl;
-  std::cout << "number of GPUs" << n_gpus  << std::endl;
+  std::cout << "number of GPUs: " << n_gpus  << std::endl;
 
+
+  std::cout << "CPU ways: " << cpu_ways  << std::endl;
+  std::cout << "GPU ways: " << gpu_ways  << std::endl;
+  std::cout << "Total ways: " << num_ways  << std::endl;
+  std::cout << "Simulation: " << is_simulation << std::endl;
+
+  if(is_simulation){
+    std::ifstream file(feat_file, std::ios::binary | std::ios::ate);
+    if (!file.is_open()) {
+        std::cerr << "Failed to open file: " << feat_file << std::endl;
+        return ;
+    }
+
+    std::cout << "File: " << feat_file << " is opend\n";
+    // Get the size of the file
+    std::streamsize file_size = file.tellg();
+    file.seekg(0, std::ios::beg);
+
+    std::streamsize remaining_size = file_size - file_off;
+
+    // Move the file pointer to the N-th byte
+    file.seekg(file_off, std::ios::beg);
+
+    // Create a string to hold the file contents after N bytes
+    std::string file_data(remaining_size, '\0');
+
+    // Read the file starting from the N-th byte
+    if (!file.read(&file_data[0], remaining_size)) {
+        std::cerr << "Failed to read file: " << feat_file << std::endl;
+        return ;
+    }
+    cuda_err_chk(cudaHostAlloc(&sim_buf, remaining_size, cudaHostAllocDefault));
+  
+    // Copy the file data from the string to the pinned memory
+    std::memcpy(sim_buf, file_data.data(), remaining_size);
+    
+    std::cout << "Simulation Buffer created\n";
+  }
+
+  
 
   num_sets = n_pages / num_ways;
-  cache_handle = new NVSHMEM_cache_handle<TYPE>(num_sets, num_ways, page_size, ctrls[0][0], ctrls, cudaDevice, cudaDevice, num_gpus);
+  cache_handle = new NVSHMEM_cache_handle<TYPE>(num_sets, gpu_ways, page_size, /*ctrls[0][0],*/ ctrls, cudaDevice, cudaDevice, num_gpus, cpu_ways, is_simulation, sim_buf);
   cache_ptr = cache_handle -> get_ptr();
 
   cuda_err_chk(cudaDeviceSynchronize());
@@ -263,10 +312,12 @@ void NVSHMEM_Cache<TYPE>::send_requests(uint64_t i_src_index_ptr, int64_t num_in
     NVShmem_print_kernel<TYPE><<<1,1>>>(cache_ptr);
     cuda_err_chk(cudaDeviceSynchronize())
 
-    for(int i = 0; i < n_ctrls; i++){
-    std::cout << "print ctrl reset " << i << ": ";
-      (this->ctrls[i])->print_reset_stats();
-      std::cout << std::endl;
+    if(simulation == false){
+      for(int i = 0; i < n_ctrls; i++){
+      std::cout << "print ctrl reset " << i << ": ";
+        (this->ctrls[i])->print_reset_stats();
+        std::cout << std::endl;
+      }
     }
 
     std::cout << "Request Time: \t " << this->request_time << std::endl;
@@ -347,15 +398,265 @@ void NVSHMEM_Cache<TYPE>::send_requests(uint64_t i_src_index_ptr, int64_t num_in
       nvshmem_quiet();
   }
 
+  template <typename TYPE>
+  NVSHMEM_Cache<TYPE>::~NVSHMEM_Cache() {
+      if(sim_buf != nullptr)
+          cudaFreeHost (sim_buf);
+    }
+
+
+
+void Emulate_Cache::read_feature(uint64_t i_ptr, uint64_t i_index_ptr,
+		                                     int64_t num_index, int dim, int cache_dim, uint64_t key_off, uint64_t i_static_info_ptr) {
+                              
+	  float *tensor_ptr = (float *)i_ptr;
+	    int64_t *index_ptr = (int64_t *)i_index_ptr;
+	      uint8_t* static_info_ptr = (uint8_t*) i_static_info_ptr;
+
+	        uint64_t b_size = 128;
+		  uint64_t n_warp = b_size / 32;
+		    uint64_t g_size = (num_index+n_warp - 1) / n_warp;
+
+		      cuda_err_chk(cudaDeviceSynchronize());
+		        auto t1 = Clock::now();
+
+			  Emulate_SA_read_feature_kernel<float><<<g_size, b_size>>>(Emul_cache_ptr, tensor_ptr,
+					                                                  index_ptr, dim, num_index, cache_dim, key_off, static_info_ptr);
+
+      cuda_err_chk(cudaDeviceSynchronize());
+}
+
+void Emulate_Cache::read_feature_with_color(uint64_t i_ptr, uint64_t i_index_ptr,
+		                                     int64_t num_index, int dim, int cache_dim, uint64_t key_off, uint64_t i_static_info_ptr, uint64_t i_color_ptr) {
+                              
+	  float *tensor_ptr = (float *)i_ptr;
+	    int64_t *index_ptr = (int64_t *)i_index_ptr;
+	      uint8_t* static_info_ptr = (uint8_t*) i_static_info_ptr;
+
+	        uint64_t b_size = 128;
+		  uint64_t n_warp = b_size / 32;
+		    uint64_t g_size = (num_index+n_warp - 1) / n_warp;
+
+		      cuda_err_chk(cudaDeviceSynchronize());
+		        auto t1 = Clock::now();
+
+          uint64_t* color_data = (uint64_t*) i_color_ptr;
+
+			  Emulate_SA_read_feature_with_color_kernel<float><<<g_size, b_size>>>(Emul_cache_ptr, tensor_ptr,
+					                                                  index_ptr, dim, num_index, cache_dim, key_off, static_info_ptr, color_data);
+
+      cuda_err_chk(cudaDeviceSynchronize());
+}
+
+
+void Emulate_Cache::init_cache(uint64_t num_sets, uint64_t num_ways, uint64_t page_size, uint32_t cudaDevice, uint8_t eviction_policy, int cache_track, uint64_t num_colors){
+    bool c_track = false;
+    if(cache_track == 1)
+      c_track = true;
+    printf("Init Cache number of sets: %lli num_ways: %lli\n", num_sets, num_ways);
+	  Emul_SA_handle = new Emulate_SA_handle<float>(num_sets, num_ways, page_size, cudaDevice, eviction_policy, c_track, num_colors);
+	  Emul_cache_ptr = Emul_SA_handle -> get_ptr();
+}
+
+void Emulate_Cache::print_counters(){
+  printf("Printing Cache Counters\n");
+  //Emul_SA_handle -> print_counters();
+  Emulate_SA_print_counters<<<1,1>>>(Emul_cache_ptr);
+}
+
+float Emulate_Cache::color_score(uint64_t color){
+  return Emul_SA_handle -> color_score(color);
+}
+
+void Emulate_Cache::distribute_node(uint64_t items, uint64_t score_ten_ptr, uint64_t dist_ten_ptr, uint64_t counter_ten_ptr, uint64_t dict_ptr, uint64_t color_ptr, int items_len, int num_nvlink, uint64_t num_colors){
+  //return Emul_SA_handle -> color_score(color);
+    cuda_err_chk(cudaDeviceSynchronize());
+
+    uint64_t b_size = 64;
+    uint64_t g_size = (items_len + b_size - 1) / b_size; 
+
+//    dim3 block_dim = (b_size, num_nvlink, 1);
+
+    float *score_ptr = (float *)score_ten_ptr;
+	  int64_t *index_ptr = (int64_t *)dist_ten_ptr;
+	  int* counter_ptr = (int*) counter_ten_ptr;
+	  int64_t *items_ptr = (int64_t *)items;
+
+    float* dict = (float*) dict_ptr;
+    int64_t* color_p = (int64_t*) color_ptr;
+
+  int shared_memory_size = b_size * num_nvlink * sizeof(float);
+
+  //self.Emul_SA.distribute_node(score_ten.data_ptr(), dist_list_ten.data_ptr(), counter_ten.data_ptr(), len(items), self.cache_track.num_gpus)
+    distribute_node_kernel<<<g_size, b_size, shared_memory_size>>>(items_ptr, score_ptr, index_ptr, counter_ptr, dict, color_p, items_len, num_nvlink, num_colors);
+      cuda_err_chk(cudaDeviceSynchronize());
+
+  return;
+}
+
+  __global__
+  void read_k(float* ptr, int n){
+  if(threadIdx.x == 0 && blockIdx.x ==0){
+    for(int i = 0; i < n; i++){
+      printf("IDX:%i val:%f\n", n, ptr[i]);
+    }
+  }
+
+  }
+
+  void Emulate_Cache::read_data(uint64_t i_ptr, int n){
+  float* ptr = (float*) i_ptr;
+  read_k<<<1,1>>>(ptr, n);
+  cuda_err_chk(cudaDeviceSynchronize());
+
+  }
+
+  __global__
+  void write_k(float* ptr, int n){
+  if(threadIdx.x == 0 && blockIdx.x ==0){
+    for(int i = 0; i < n; i++){
+      ptr[i] = i + 100.0;
+    }
+  }
+
+  }
+
+  void Emulate_Cache::write_data(uint64_t i_ptr, int n){
+  float* ptr = (float*) i_ptr;
+  write_k<<<1,1>>>(ptr, n);
+  cuda_err_chk(cudaDeviceSynchronize());
+
+  }
+
+
+  void Emulate_Cache::distribute_node_with_cache_meta(uint64_t i_item_ptr,uint64_t i_color_tensor_ptr, const std::vector<uint64_t>& return_ptr_list, const std::vector<uint64_t>&  meta_data_list, int tensor_size, int num_parts){
+  
+   // printf("start distribute node with cache meta\n");
+    int64_t* item_ptr = (int64_t*)i_item_ptr;
+    int64_t* color_tensor_ptr = (int64_t*)i_color_tensor_ptr;
+    int item_len = tensor_size * num_parts;
+    
+    int bucket_len[num_parts] =  {0};  
+    double max_score = -1.0;
+    int cur_max_part = 0;
+
+    for(int i = 0; i < item_len; i++){
+      int64_t node_id = item_ptr[i];
+     // printf("node id: %lli\n", node_id);
+      int64_t node_color = color_tensor_ptr[i];
+      cur_max_part = 0;
+      max_score = -1.0;
+      for(int j = 0; j < num_parts; j++){
+        double cur_score = (double)(((int32_t*)(meta_data_list[j]))[node_color]);
+        if(node_color == 0){
+          cur_score = 0.0;
+        } 
+        if(cur_score <= -1.0){
+          printf("node color %lli score %d\n", node_color, cur_score);
+        }
+
+
+        if(bucket_len[j] == tensor_size)
+          cur_score = -1.0;
+        
+       //printf("id: %i score: %d\n", j, cur_score);
+        if(cur_score > max_score)
+          cur_max_part = j;
+      }
+     // printf("write at %i idx: %i\n", cur_max_part,bucket_len[cur_max_part] );
+      ((int64_t*)(return_ptr_list[cur_max_part]))[bucket_len[cur_max_part]] = node_id;
+      bucket_len[cur_max_part]+=1;
+    }
+  }
+
+
+  void Emulate_Cache::distribute_node_with_affinity(uint64_t i_item_ptr,uint64_t i_color_tensor_ptr, const std::vector<uint64_t>& return_ptr_list, const std::vector<uint64_t>&  meta_data_list, uint64_t i_topk_ptr,  uint64_t i_score_ptr, int topk, int tensor_size, int num_parts){
+  
+   // printf("start distribute node with cache meta\n");
+    int64_t* item_ptr = (int64_t*) i_item_ptr;
+    int64_t* topk_ptr = (int64_t*) i_topk_ptr;
+    double* score_ptr = (double*) i_score_ptr;
+
+    int64_t* color_tensor_ptr = (int64_t*)i_color_tensor_ptr;
+    int item_len = tensor_size * num_parts;
+    
+    int bucket_len[num_parts] =  {0};  
+    double max_score = -1.0;
+    int cur_max_part = 0;
+
+    for(int i = 0; i < item_len; i++){
+      int64_t node_id = item_ptr[i];
+     // printf("node id: %lli\n", node_id);
+      int64_t node_color = color_tensor_ptr[i];
+      cur_max_part = 0;
+      max_score = -1.0;
+      for(int j = 0; j < num_parts; j++){
+        
+        double cur_score = (double)(((int32_t*)(meta_data_list[j]))[node_color]);
+        if(node_color == 0){
+          cur_score = 0.0;
+        } 
+        else{
+          for(int k = 0; k < topk; k++){
+            int64_t neigh_color = topk_ptr[(node_color - 1) * topk + k];
+            double neigh_affinity = score_ptr[(node_color - 1) * topk + k];
+            double neigh_score = 0.0;
+            int32_t meta_data = 0;
+            if(neigh_color != 0){
+              neigh_score = (double)(((int32_t*)(meta_data_list[j]))[neigh_color]);
+              meta_data = (((int32_t*)(meta_data_list[j]))[neigh_color]);
+              cur_score += (neigh_score * neigh_affinity * 5);
+            }
+            if(cur_score <= -1.0){
+              printf("node color %lli neigh color: %lli score %f neigh_affinity: %f neigh score: %f meta data:%li idx:%i\n", node_color, neigh_color, cur_score, neigh_affinity, neigh_score, meta_data, j);
+            }
+          }
+        }
+        
+        // if(cur_score <= -1.0){
+        //   printf("node color %lli score %f neigh_affinity: %f neigh score: %f\n", node_color, cur_score, neigh_affinity, neigh_score);
+        // }
+
+
+        if(bucket_len[j] == tensor_size)
+          cur_score = -1.0;
+        
+       //printf("id: %i score: %d\n", j, cur_score);
+        if(cur_score > max_score)
+          cur_max_part = j;
+      }
+     // printf("write at %i idx: %i\n", cur_max_part,bucket_len[cur_max_part] );
+      ((int64_t*)(return_ptr_list[cur_max_part]))[bucket_len[cur_max_part]] = node_id;
+      bucket_len[cur_max_part]+=1;
+    }
+  }
+
+
+
+  void Emulate_Cache::copy_meta(uint64_t i_dst_ptr){
+    int32_t* dst_ptr = (int32_t*) i_dst_ptr;
+    int32_t* src_ptr =  Emul_SA_handle -> get_meta_ptr();
+
+    memcpy(dst_ptr, src_ptr, sizeof(int32_t) * (Emul_SA_handle -> num_color_));
+  }
+  
+  Emulate_Cache::~Emulate_Cache() {
+      if (Emul_SA_handle) {
+          delete Emul_SA_handle;  // Free the dynamically allocated Emulate_SA_handle
+          Emul_SA_handle = nullptr;  // Set pointer to null to avoid dangling pointers
+      }
+  }
+
+
 
 PYBIND11_MODULE(Dist_Cache, m) {
   m.doc() = "Python bindings for an example library";
 
   namespace py = pybind11;
 
-      // py::class_<GIDS_Controllers>(m, "Dist_GIDS_Controllers")
-      // .def(py::init<>())
-      // .def("init_GIDS_controllers", &GIDS_Controllers::init_GIDS_controllers);
+      py::class_<Dist_GIDS_Controllers>(m, "Dist_GIDS_Controllers")
+      .def(py::init<>())
+      .def("init_GIDS_controllers", &Dist_GIDS_Controllers::init_GIDS_controllers);
 
 
       py::class_<NVSHMEM_Cache<float>>(m, "NVSHMEM_Cache")
@@ -375,6 +676,22 @@ PYBIND11_MODULE(Dist_Cache, m) {
       .def("get_world_size", &NVSHMEM_Cache<float>::get_world_size)
       .def("get_mype_node", &NVSHMEM_Cache<float>::get_mype_node)
       .def("NVshmem_quiet", &NVSHMEM_Cache<float>::NVshmem_quiet);
+
+      py::class_<Emulate_Cache>(m, "Emulate_Cache")
+      .def(py::init<>())
+      .def("init_cache", &Emulate_Cache::init_cache)
+      .def("print_counters", &Emulate_Cache::print_counters)
+      .def("color_score", &Emulate_Cache::color_score)
+ 			.def("read_feature", &Emulate_Cache::read_feature)
+ 			.def("read_data", &Emulate_Cache::read_data)
+ 			.def("write_data", &Emulate_Cache::write_data)
+ 			.def("distribute_node", &Emulate_Cache::distribute_node)
+ 			.def("distribute_node_with_cache_meta", &Emulate_Cache::distribute_node_with_cache_meta)
+      	.def("distribute_node_with_affinity", &Emulate_Cache::distribute_node_with_affinity)
+
+      .def("copy_meta", &Emulate_Cache::copy_meta)
+
+      .def("read_feature_with_color", &Emulate_Cache::read_feature_with_color);
 
 
 ;

@@ -22,126 +22,126 @@
 #include "nvm_cmd.h"
 
 // #include "set_associative_page_cache.h"
-enum Eviction_Policy {
-    RR,
-    Static,
-    Dynamic,
-    Hybrid
-};
+// enum Eviction_Policy {
+//     RR,
+//     Static,
+//     Dynamic,
+//     Hybrid
+// };
 
-#define FULL_MASK 0xFFFFFFFF
-#define FF_64 0xFFFFFFFFFFFFFFFF
-#define FE_64 0xFFFEFFFFFFFFFFFF
+// #define FULL_MASK 0xFFFFFFFF
+// #define FF_64 0xFFFFFFFFFFFFFFFF
+// #define FE_64 0xFFFEFFFFFFFFFFFF
 
-#define FF_48 0xFFFFFFFFFFFFFF
-#define FF_16 0xFFFF
-#define FE_16 0xFFFE
+// #define FF_48 0xFFFFFFFFFFFFFF
+// #define FF_16 0xFFFF
+// #define FE_16 0xFFFE
 
 
 
-template <typename T = float>
- __forceinline__
-__device__
-void warp_memcpy(void* src, void* dst, size_t size, uint32_t mask){
-     T* src_ptr = (T*) src;
-     T* dst_ptr = (T*) dst;
+// template <typename T = float>
+//  __forceinline__
+// __device__
+// void warp_memcpy(void* src, void* dst, size_t size, uint32_t mask){
+//      T* src_ptr = (T*) src;
+//      T* dst_ptr = (T*) dst;
      
-     uint32_t count = __popc(mask);
-     uint32_t lane_id = threadIdx.x %32;
+//      uint32_t count = __popc(mask);
+//      uint32_t lane_id = threadIdx.x %32;
      
-     uint32_t my_id = count - (__popc(mask>>(lane_id)));
-     for(; my_id < size/sizeof(T); my_id += count){
-          dst_ptr[my_id] =  src_ptr[my_id]; 
-     }
- }
+//      uint32_t my_id = count - (__popc(mask>>(lane_id)));
+//      for(; my_id < size/sizeof(T); my_id += count){
+//           dst_ptr[my_id] =  src_ptr[my_id]; 
+//      }
+//  }
 
 
 
-class seqlock {
-    simt::atomic<uint32_t, simt::thread_scope_device>  ticket_;
-    simt::atomic<uint32_t, simt::thread_scope_device>  current_;
+// class seqlock {
+//     simt::atomic<uint32_t, simt::thread_scope_device>  ticket_;
+//     simt::atomic<uint32_t, simt::thread_scope_device>  current_;
 
-    public:
+//     public:
 
-    __device__
-    unsigned 
-    read_lock(){
-        unsigned ticket = current_.load(simt::memory_order_acquire);
-        return ticket & ~0x1;
-    }
+//     __device__
+//     unsigned 
+//     read_lock(){
+//         unsigned ticket = current_.load(simt::memory_order_acquire);
+//         return ticket & ~0x1;
+//     }
 
-    __device__
-    unsigned
-    read_unlock(){
-        return current_.fetch_or(0, simt::memory_order_release);
-    }
+//     __device__
+//     unsigned
+//     read_unlock(){
+//         return current_.fetch_or(0, simt::memory_order_release);
+//     }
 
-    __device__
-    unsigned 
-    read_busy_block(){
-        unsigned delay = 8;
-        unsigned ticket = current_.load(simt::memory_order_acquire);
-        while(ticket & 0x1){
-            if(delay < 256) delay <<= 1;
-            else delay = 8;
+//     __device__
+//     unsigned 
+//     read_busy_block(){
+//         unsigned delay = 8;
+//         unsigned ticket = current_.load(simt::memory_order_acquire);
+//         while(ticket & 0x1){
+//             if(delay < 256) delay <<= 1;
+//             else delay = 8;
 
-            ticket = current_.load(simt::memory_order_acquire);
-        }
-        return ticket & ~(0x1U << 1);
-    }
+//             ticket = current_.load(simt::memory_order_acquire);
+//         }
+//         return ticket & ~(0x1U << 1);
+//     }
 
-    __device__
-    unsigned 
-    read_busy_unlock(){
-        return current_.fetch_or(0, simt::memory_order_release) & ~(0X1U << 1);
-    }
+//     __device__
+//     unsigned 
+//     read_busy_unlock(){
+//         return current_.fetch_or(0, simt::memory_order_release) & ~(0X1U << 1);
+//     }
 
    
 
-    __device__
-    void
-    busy_wait(unsigned ticket){
-        unsigned current = current_.load(simt::memory_order_acquire);
-        while(current != ticket){
-            __nanosleep(8);
-            current = current_.load(simt::memory_order_acquire);
-        }
-        current_.fetch_add(1, simt::memory_order_release);
-    }
+//     __device__
+//     void
+//     busy_wait(unsigned ticket){
+//         unsigned current = current_.load(simt::memory_order_acquire);
+//         while(current != ticket){
+//             __nanosleep(8);
+//             current = current_.load(simt::memory_order_acquire);
+//         }
+//         current_.fetch_add(1, simt::memory_order_release);
+//     }
 
-    __device__
-    unsigned
-    write_lock(){
-        unsigned ticket = ticket_.fetch_add(2, simt::memory_order_acquire);
-        busy_wait(ticket);
-    }
+//     __device__
+//     unsigned
+//     write_lock(){
+//         unsigned ticket = ticket_.fetch_add(2, simt::memory_order_acquire);
+//         busy_wait(ticket);
+//     }
 
-    __device__
-    unsigned
-    write_unlock(){
-        current_.fetch_add(1, simt::memory_order_release);
-    }
+//     __device__
+//     unsigned
+//     write_unlock(){
+//         current_.fetch_add(1, simt::memory_order_release);
+//     }
 
-    __device__
-    unsigned
-    write_busy_lock(){
-        unsigned ticket = ticket_.fetch_add(4, simt::memory_order_acquire);
-        busy_wait(ticket);
-    }
+//     __device__
+//     unsigned
+//     write_busy_lock(){
+//         unsigned ticket = ticket_.fetch_add(4, simt::memory_order_acquire);
+//         busy_wait(ticket);
+//     }
 
-    __device__
-    unsigned
-    write_unbusy(){
-        current_.fetch_add(1, simt::memory_order_release);
-    }
+//     __device__
+//     unsigned
+//     write_unbusy(){
+//         current_.fetch_add(1, simt::memory_order_release);
+//     }
 
-    __device__
-    unsigned
-    write_busy_unlock(){
-        current_.fetch_add(2, simt::memory_order_release);
-    }
+//     __device__
+//     unsigned
+//     write_busy_unlock(){
+//         current_.fetch_add(2, simt::memory_order_release);
+//     }
 
-};
+// };
 
 
 template<typename T>
@@ -563,7 +563,13 @@ struct Emulate_SA_cache_d_t {
        // way = __shfl_sync(mask, way, warp_leader);
         if(lane == warp_leader) {
             if(color_track_){
-                atomicSub(&(color_counters[color_meta_[set_offset + way]]), 1); 
+                if(color_meta_[set_offset + way] != 0){
+                    int32_t prev = atomicSub(&(color_counters[color_meta_[set_offset + way]]), 1); 
+                    if(prev == 0){
+                        uint64_t c = color_meta_[set_offset + way];
+                        printf("color:%llu wrong\n ", (unsigned long long) c);
+                    }
+                }
             }
             (cur_cl_seqlock + way) -> write_busy_lock();
         }
@@ -734,25 +740,27 @@ struct Emulate_SA_handle{
     {
        
 
-        cudaMalloc((void**)&d_set_locks, sizeof(seqlock) * num_sets_);
-        cudaMalloc((void**)&d_way_locks, sizeof(seqlock) * num_sets_ * num_ways_);
+        cuda_err_chk(cudaMalloc((void**)&d_set_locks, sizeof(seqlock) * num_sets_));
+        cuda_err_chk(cudaMalloc((void**)&d_way_locks, sizeof(seqlock) * num_sets_ * num_ways_));
 
-        cudaMalloc((void**)&set_cnt_, sizeof(uint32_t) * num_sets_);
-        cudaMalloc((void**)&keys_, sizeof(uint64_t) * num_sets_ * num_ways_);
+        cuda_err_chk(cudaMalloc((void**)&set_cnt_, sizeof(uint32_t) * num_sets_));
+        cuda_err_chk(cudaMalloc((void**)&keys_, sizeof(uint64_t) * num_sets_ * num_ways_));
 
-        cudaMemset(d_set_locks, 0, sizeof(seqlock) * num_sets_);
-        cudaMemset(d_way_locks, 0, sizeof(seqlock) * num_sets_ * num_ways_);
-        cudaMemset(set_cnt_, 0, sizeof(seqlock) * num_sets_);
-        cudaMemset(keys_, 0xFF, sizeof(uint64_t) * num_sets_ * num_ways_);
+        cuda_err_chk(cudaMemset(d_set_locks, 0, sizeof(seqlock) * num_sets_));
+        cuda_err_chk(cudaMemset(d_way_locks, 0, sizeof(seqlock) * num_sets_ * num_ways_));
+        cuda_err_chk(cudaMemset(set_cnt_, 0, sizeof(uint32_t) * num_sets_));
+        cuda_err_chk(cudaMemset(keys_, 0xFF, sizeof(uint64_t) * num_sets_ * num_ways_));
 
-        cudaMalloc((void**)&cache_ptr, sizeof(SA_cache_d_t<T>));
+        cuda_err_chk(cudaMalloc((void**)&cache_ptr, sizeof(Emulate_SA_cache_d_t<T>)));
 
         if(color_track){
-            cudaHostAlloc((int32_t **)&color_counters, sizeof(int32_t) * num_color_ , cudaHostAllocMapped);
-            cudaHostGetDevicePointer((int32_t **)&device_color_counters, (int32_t *)color_counters, 0);
-            cudaMemset(device_color_counters, 0x0, (uint64_t) sizeof(int32_t) * num_color_);
+            cuda_err_chk(cudaHostAlloc((int32_t **)&color_counters, sizeof(int32_t) * num_color_ , cudaHostAllocMapped));
+            cuda_err_chk(cudaHostGetDevicePointer((int32_t **)&device_color_counters, (int32_t *)color_counters, 0));
+            cuda_err_chk(cudaMemset(device_color_counters, 0x0, (uint64_t) sizeof(int32_t) * num_color_));
 
-            cudaMalloc((void**)&color_meta, sizeof(uint64_t) * num_sets_ * num_ways_);
+            cuda_err_chk(cudaMalloc((void**)&color_meta, sizeof(uint64_t) * num_sets_ * num_ways_));
+            cuda_err_chk(cudaMemset(color_meta, 0x0, sizeof(uint64_t) * num_sets_ * num_ways_));
+
         }
 
 
@@ -762,7 +770,7 @@ struct Emulate_SA_handle{
         }
 
         uint64_t cache_size = CL_SIZE_ * num_sets_ * num_ways_;
-        //cudaMalloc(&base_addr, cache_size);
+       // cudaMalloc(&base_addr, cache_size);
 
 
         ctrl_counter_buf = createBuffer(sizeof(simt::atomic<uint64_t, simt::thread_scope_device>), cudaDevice);
@@ -793,7 +801,7 @@ struct Emulate_SA_handle{
 
         //std::cout << "Cache host: " << cache_host.victim_buffer.buffer_depth;
         printf("Eviction Policy: %u\n", eviction_p);
-        cuda_err_chk(cudaMemcpy(cache_ptr, &cache_host, sizeof(SA_cache_d_t<T>), cudaMemcpyHostToDevice));
+        cuda_err_chk(cudaMemcpy(cache_ptr, &cache_host, sizeof(Emulate_SA_cache_d_t<T>), cudaMemcpyHostToDevice));
     }
 
     __host__ 
@@ -807,6 +815,12 @@ struct Emulate_SA_handle{
     color_score(uint64_t color){
         return (float) color_counters[color];
     }
+
+    __host__
+    int32_t*
+    get_meta_ptr(){
+        return color_counters;
+    }
     // __host__
     // void
     // print_counters(){
@@ -815,6 +829,26 @@ struct Emulate_SA_handle{
     //     cache_ptr -> print_stats();
     //     return ;
     // }
+
+    __host__ 
+     ~Emulate_SA_handle() {
+        // Free CUDA memory
+        if (d_set_locks) cudaFree(d_set_locks);
+        if (d_way_locks) cudaFree(d_way_locks);
+        if (set_cnt_) cudaFree(set_cnt_);
+        if (keys_) cudaFree(keys_);
+        if (cache_ptr) cudaFree(cache_ptr);
+        
+        // Free color-related memory
+        if (color_counters) cudaFreeHost(color_counters);
+        if (device_color_counters) cudaFree(device_color_counters);
+        if (color_meta) cudaFree(color_meta);
+        
+        // Free static info (used for eviction policy)
+        if (static_info_) cudaFree(static_info_);
+        
+        // Other buffer pointers do not need explicit freeing as they are managed by BufferPtr
+    }
 
 };
 

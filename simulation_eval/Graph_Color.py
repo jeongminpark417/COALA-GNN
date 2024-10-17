@@ -30,11 +30,13 @@ def color_graph(g, args, device):
 
     max_int64 = (1 << 63) - 1
 
-    #color_tensor = torch.full((num_nodes,), max_int64, dtype=torch.int64).contiguous()
     color_tensor = torch.zeros(num_nodes, dtype=torch.int64).contiguous()
     
     Grah_Coloring_Tool.set_color_buffer(color_tensor.data_ptr())
-    Grah_Coloring_Tool.cpu_color_graph()
+    #Grah_Coloring_Tool.cpu_color_graph()
+    train_nid = torch.nonzero(g.ndata['train_mask'], as_tuple=True)[0]
+    print("train nid: ", train_nid)
+    Grah_Coloring_Tool.cpu_color_graph_optimized(train_nid.data_ptr(), len(train_nid))
     
     num_colors = Grah_Coloring_Tool.get_num_color()
     print(f"num_colors: {num_colors}")
@@ -43,20 +45,23 @@ def color_graph(g, args, device):
     print(f"num colored node: {num_colored_nodes}")
 
     topk_color_tensor =  torch.zeros(num_colors * args.topk, dtype=torch.int64).contiguous()
-    
+    topk_affinity_tensor =  torch.zeros(num_colors * args.topk, dtype=torch.float64).contiguous()
+
     Grah_Coloring_Tool.set_topk_color_buffer(topk_color_tensor.data_ptr())
-    # print("count nearest colors")
-    # Grah_Coloring_Tool.cpu_count_nearest_color()
+    Grah_Coloring_Tool.set_topk_affinity_buffer(topk_affinity_tensor.data_ptr())
+
 
     print("count nearest colors with less memory")
-    Grah_Coloring_Tool.cpu_count_nearest_color_less_memory()
+    #Grah_Coloring_Tool.cpu_count_nearest_color_less_memory()
+    Grah_Coloring_Tool.cpu_calculate_color_affinity()
 
     del Grah_Coloring_Tool
     print("saving torch")
     torch.save(color_tensor, args.out_path_color)
     topk_color_tensor = topk_color_tensor.reshape(num_colors, args.topk)
-
     torch.save(topk_color_tensor, args.out_path_topk)
+    topk_affinity_tensor = topk_affinity_tensor.reshape(num_colors, args.topk)
+    torch.save(topk_affinity_tensor, args.out_path_affinity)
     print("DONE")
  
 
@@ -81,6 +86,8 @@ if __name__ == '__main__':
     parser.add_argument('--out_path_color', type=str, default='./color.pt',
         help='path for the output color file')
     parser.add_argument('--out_path_topk', type=str, default='./topk.pt', 
+        help='path for the output topk file')
+    parser.add_argument('--out_path_affinity', type=str, default='./score.pt', 
         help='path for the output topk file')
 
     parser.add_argument('--topk', type=int, default=10)

@@ -18,12 +18,14 @@
 #include "nvm_types.h"
 #include "nvm_util.h"
 #include "buffer.h"
+#include "nvshmem_cache_buffer.h"
 #include "ctrl.h"
 #include <iostream>
 #include "nvm_parallel_queue.h"
 #include "nvm_cmd.h"
 
 //#include <cuda_runtime.h>
+
 
 
 enum Eviction_Policy {
@@ -158,6 +160,9 @@ struct NVSHMEM_cache_d_t {
 
     uint64_t num_sets;
     uint64_t num_ways;
+    uint64_t cpu_num_ways;
+    uint64_t gpu_num_ways;
+
     uint64_t CL_SIZE;
 
 
@@ -175,6 +180,8 @@ struct NVSHMEM_cache_d_t {
     uint64_t* prp2_;   
     bool prps_;
 
+    uint8_t* cpu_base_addr_;
+    uint64_t* cpu_prp1_;  
 
     simt::atomic<uint64_t, simt::thread_scope_device>* q_head;
     simt::atomic<uint64_t, simt::thread_scope_device>* q_tail;
@@ -182,33 +189,44 @@ struct NVSHMEM_cache_d_t {
     simt::atomic<uint64_t, simt::thread_scope_device>* extra_reads;
 
 
-    simt::atomic<uint64_t, simt::thread_scope_device> double_read;
-    simt::atomic<uint64_t, simt::thread_scope_device> hit_cnt;
-    simt::atomic<uint64_t, simt::thread_scope_device> miss_cnt;
+    simt::atomic<uint64_t, simt::thread_scope_device> gpu_double_read;
+    simt::atomic<uint64_t, simt::thread_scope_device> gpu_hit_cnt;
+    simt::atomic<uint64_t, simt::thread_scope_device> gpu_miss_cnt;
+
+    simt::atomic<uint64_t, simt::thread_scope_device> cpu_double_read;
+    simt::atomic<uint64_t, simt::thread_scope_device> cpu_hit_cnt;
+    simt::atomic<uint64_t, simt::thread_scope_device> cpu_miss_cnt;
+
 
 
     uint8_t evict_policy = 0;
 
+    bool is_simulation = false;
+    void* sim_buf = nullptr;
 
-    NVSHMEM_cache_d_t(seqlock* set_locks, seqlock* way_locks,uint64_t n_sets, uint64_t n_ways, uint64_t cl_size, uint64_t* keys, uint32_t* set_cnt,
+
+    NVSHMEM_cache_d_t(seqlock* set_locks, seqlock* way_locks,uint64_t n_sets, uint64_t g_n_ways, uint64_t cl_size, uint64_t* keys, uint32_t* set_cnt,
                  Controller** d_ctrls, uint32_t n_ctrls, uint64_t n_blocks_per_page, uint8_t* base_addr, uint64_t* prp1, uint64_t* prp2, bool prps,
                  simt::atomic<uint64_t, simt::thread_scope_device>* queue_head, simt::atomic<uint64_t, simt::thread_scope_device>* queue_tail, 
                  simt::atomic<uint64_t, simt::thread_scope_device>* queue_lock, simt::atomic<uint64_t, simt::thread_scope_device>* queue_extra_reads,
         
                   
-                    unsigned int my_GPU_id, unsigned n_gpus
+                    unsigned int my_GPU_id, unsigned n_gpus, uint64_t cpu_n_ways, uint8_t* cpu_base_addr, uint64_t* cpu_prp1, bool simulation, void* sim_buf_ptr
                  ) :
         set_locks_(set_locks),
         way_locks_(way_locks),
         num_sets(n_sets),
-        num_ways(n_ways),
+        gpu_num_ways(g_n_ways),
+        cpu_num_ways(cpu_n_ways),
         CL_SIZE(cl_size),
         keys_(keys),
         set_cnt_(set_cnt),
         base_addr_(base_addr),
+        cpu_base_addr_(cpu_base_addr),
         prp1_(prp1),
         prp2_(prp2),
         prps_(prps),
+        cpu_prp1_(cpu_prp1),
         d_ctrls_(d_ctrls),
         n_ctrls_(n_ctrls),
         n_blocks_per_page_(n_blocks_per_page),
@@ -219,13 +237,17 @@ struct NVSHMEM_cache_d_t {
 
 
         my_GPU_id_(my_GPU_id),
-        num_gpus(n_gpus)
+        num_gpus(n_gpus),
+        is_simulation(simulation),
+        sim_buf(sim_buf_ptr)
 
         {
-        double_read = 0;
-        hit_cnt = 0;
-        miss_cnt = 0;
-
+            num_ways = g_n_ways + cpu_n_ways;
+            //double_read = 0;
+            gpu_hit_cnt = 0;
+            gpu_miss_cnt = 0;
+            cpu_hit_cnt = 0;
+            cpu_miss_cnt = 0;
 
         }
 
@@ -233,14 +255,25 @@ struct NVSHMEM_cache_d_t {
     __device__
     void
     print_stats(){
-        printf("hit count: %llu\n", hit_cnt);        
-        printf("miss count: %llu\n", miss_cnt);        
-        printf("double reads: %llu\n", double_read);   
-        float hit_ratio = (float) hit_cnt / (hit_cnt + miss_cnt);
-        printf("Hit ratio: %f\n", hit_ratio);
-        hit_cnt = 0;
-        miss_cnt = 0;
-        double_read = 0;
+        printf("GPU hit count: %llu CPU hit count: %llu\n", (unsigned long long) gpu_hit_cnt,  (unsigned long long) cpu_hit_cnt);            
+        printf("GPU miss count: %llu CPU miss count: %llu\n", (unsigned long long) gpu_miss_cnt,  (unsigned long long) cpu_miss_cnt);            
+//        printf("GPU double reads: %llu CPU double reads: %llu\n", (unsigned long long) gpu_double_read,  (unsigned long long) cpu_double_read);            
+
+        uint64_t system_hit = gpu_hit_cnt + cpu_hit_cnt;
+        uint64_t system_miss = gpu_miss_cnt + cpu_miss_cnt;
+        
+        float overall_hit_ratio = (float) (system_hit) / (system_hit + system_miss);
+        float gpu_hit_ratio = (float) (gpu_hit_cnt) / (system_hit + system_miss);
+        float cpu_hit_ratio = (float) (cpu_hit_cnt) / (system_hit + system_miss);
+
+        printf("System Hit ratio: %f GPU hit ratio: %f CPU hit ratio:%f\n", overall_hit_ratio, gpu_hit_ratio, cpu_hit_ratio);
+
+        gpu_hit_cnt = 0;
+        gpu_miss_cnt = 0;
+       // gpu_double_read = 0;
+        cpu_hit_cnt = 0;
+        cpu_miss_cnt = 0;
+        //cpu_double_read = 0;
     }
 
 
@@ -401,16 +434,24 @@ struct NVSHMEM_cache_d_t {
 
 
     inline __device__ 
-    void read_data(QueuePair* qp, const uint64_t starting_lba, const uint64_t n_blocks, const unsigned long long pc_entry) {
+    void read_data(QueuePair* qp, const uint64_t starting_lba, const uint64_t n_blocks, const unsigned long long pc_entry, bool to_cpu ) {
 
         nvm_cmd_t cmd;
         uint16_t cid = get_cid(&(qp->sq));
 
         nvm_cmd_header(&cmd, cid, NVM_IO_READ, qp->nvmNamespace);
-        uint64_t prp1 = prp1_[pc_entry];
-        uint64_t prp2 = 0;
-        if (prps_)
-            prp2 = prp2_[pc_entry];
+        uint64_t prp1, prp2;
+        if(to_cpu){
+            prp1 = cpu_prp1_[pc_entry];
+            prp2 = 0;
+        }
+        else{
+            prp1 = prp1_[pc_entry];
+            prp2 = 0;
+            if (prps_)
+                prp2 = prp2_[pc_entry];
+        }
+        
         nvm_cmd_data_ptr(&cmd, prp1, prp2);
         nvm_cmd_rw_blks(&cmd, starting_lba, n_blocks);
         uint16_t sq_pos = sq_enqueue(&qp->sq, &cmd);
@@ -433,172 +474,49 @@ struct NVSHMEM_cache_d_t {
 
     __forceinline__
     __device__
-    void read_page(uint64_t pg_id, uint64_t evicted_page, uint32_t queue){
+    void read_page(uint64_t pg_id, uint64_t evicted_page, uint32_t queue, bool to_cpu){
 
-        //Need to be fixed (Assuming Page Start is 0)
+
+      
         uint64_t ctrl = pg_id % n_ctrls_;
         uint64_t b_page = pg_id / n_ctrls_;
 
-
-
         Controller* c = d_ctrls_[ctrl];
         c->access_counter.fetch_add(1, simt::memory_order_relaxed);
-		read_data((c->d_qps)+queue, ((b_page)*n_blocks_per_page_), n_blocks_per_page_, evicted_page);
+        read_data((c->d_qps)+queue, ((b_page)*n_blocks_per_page_), n_blocks_per_page_, evicted_page, to_cpu);
         return;
-
+        
     }
+     __forceinline__
+    __device__
+    void read_page_simulation(uint64_t pg_id, void* dst, uint32_t mask){
+
+        void* src = sim_buf + pg_id * CL_SIZE;
+         warp_memcpy<float>(src, dst, CL_SIZE, mask);
+
+        return;
+    }
+                
+
 
     __forceinline__
     __device__
     void 
-    get_data(uint64_t id, T* output_ptr, uint64_t b_id, uint8_t* static_info_ptr){
+    get_data( uint64_t id, T* output_ptr, bool use_nvshmem = false, int rank = 0, int dst_gpu = 0){
 
         uint32_t lane = lane_id();
         uint32_t mask = __activemask();
 
-        uint64_t cl_id = id / num_gpus;
-        uint64_t set_id = get_set_id(cl_id);
-        uint64_t set_offset = set_id * num_ways;
+        //uint64_t cl_id = id / num_gpus;
+        uint64_t cl_id = id ;
 
-        seqlock* cur_set_lock = set_locks_ + set_id;
-        seqlock* cur_cl_seqlock = way_locks_ + set_id * num_ways;
-
-        uint32_t warp_leader = __ffs(mask) - 1;
-        bool cont = true;
-        bool done = false;
-
-        do {
-            uint64_t set_before, set_after;
-            if(lane == warp_leader) {
-                set_before = cur_set_lock->read_lock();
-            }
-            set_before = __shfl_sync(mask, set_before, warp_leader);
-            unsigned way = search_ways(cl_id, mask, set_id);
-
-            if(way < num_ways){
-                if(way < num_ways){
-                    seqlock* way_lock = way_locks_ + set_offset + way;
-                    uint64_t way_before;
-                    if(lane == warp_leader) {
-                        way_before = way_lock->read_busy_block();
-                    }
-                    way_before = __shfl_sync(mask, way_before, warp_leader);
-
-                    bool hit = false;
-                    auto way_offset = set_offset + way;
-                    auto way_key = keys_ + way_offset;
-
-                    if(cl_id == (*way_key)){
-                        hit = true;
-                        //memcpy
-                        void* src = ((void*)base_addr_)+ (set_offset + way) * CL_SIZE;
-                        warp_memcpy<T>(src, output_ptr, CL_SIZE, mask);
-                    }
-                    __syncwarp(mask);
-
-                    uint64_t way_after;
-                    if(lane == warp_leader) {
-                        way_after = way_lock->read_busy_unlock();
-                    }
-                    way_after = __shfl_sync(mask, way_after, warp_leader);
-
-                    if(lane == warp_leader){
-                        if(hit && (way_after != way_before)){
-                            double_read.fetch_add(1, simt::memory_order_relaxed);
-                        }
-
-                    }
-
-
-                    if(!done)
-                        done = hit && (way_before == way_after);
-
-                    unsigned not_done_mask = __ballot_sync(mask, !done);
-                    if(not_done_mask == 0){
-                        if(lane == warp_leader) hit_cnt.fetch_add(1, simt::memory_order_relaxed);
-                        return;
-                    }
-
-                }
-            }
-            if(lane == warp_leader) set_after = cur_set_lock->read_unlock();
-            set_after = __shfl_sync(mask, set_after, warp_leader);
-            cont = set_before != set_after;
-        } while(cont);
-
-        //miss
-        
-        if(lane == warp_leader) {
-            cur_set_lock->write_lock();
-        }
-        __syncwarp(mask);
-
-        //EVICTION
-        uint32_t way;
-        way = evict(lane, warp_leader, mask, set_id, evict_policy);
-
-        if(lane == warp_leader) {
-            (cur_cl_seqlock + way) -> write_busy_lock();
-        }
-        //Check
-        uint64_t old_key =  keys_[set_offset + way];
-        keys_[set_offset + way] = cl_id;
-
-        if(lane == warp_leader) {
-            cur_set_lock->write_unlock();
-        }
-        __syncwarp(mask);
-
-        //HANDLE MISS
-        //printf("EVICT\n");
-
-        uint32_t queue;
-        if(lane == warp_leader) {
-            queue = get_smid() % (d_ctrls_[0]->n_qps);
-            read_page(cl_id, set_offset + way, queue);
-        }
-
-        __syncwarp(mask);
-
-        if(lane == warp_leader) {
-            (cur_cl_seqlock + way)->write_unbusy();
-        }
-        __syncwarp(mask);
-
-        void* src = ((void*)base_addr_)+ (set_offset + way) * CL_SIZE;
-        warp_memcpy<T>(src, output_ptr, CL_SIZE, mask);
-        if(lane == warp_leader) {
-            miss_cnt.fetch_add(1, simt::memory_order_relaxed);
-            // if(evict_policy == 1 ){
-            //     // STATIC INFO
-            //     static_info_[set_offset+way] = static_info_ptr[b_id];
-            // }
-        }
-        __syncwarp(mask);
-
-        if(lane == warp_leader) {
-            (cur_cl_seqlock + way)->write_busy_unlock();
-        }
-        __syncwarp(mask);
-        
-
-    }
-
-
-__forceinline__
-    __device__
-    void 
-    dist_get_data(uint64_t id, T* output_ptr, int rank, int dst_gpu){
-
-        uint32_t lane = lane_id();
-        uint32_t mask = __activemask();
-
-        uint64_t cl_id = id;
         uint64_t set_id = get_dist_set_id(cl_id, num_gpus);
-        uint64_t set_offset = set_id * num_ways;
+        uint64_t set_offset = set_id * (num_ways);
+        uint64_t gpu_set_offset = set_id * (gpu_num_ways);
+        uint64_t cpu_set_offset = set_id * (cpu_num_ways);
 
         seqlock* cur_set_lock = set_locks_ + set_id;
-        seqlock* cur_cl_seqlock = way_locks_ + set_id * num_ways;
+        seqlock* cur_cl_seqlock = way_locks_ + set_id * (num_ways );
 
         uint32_t warp_leader = __ffs(mask) - 1;
         bool cont = true;
@@ -614,6 +532,9 @@ __forceinline__
 
             if(way < num_ways){
                 if(way < num_ways){
+                    bool is_gpu_cache = false;
+                    if(way < gpu_num_ways)
+                        is_gpu_cache = true;
                     seqlock* way_lock = way_locks_ + set_offset + way;
                     uint64_t way_before;
                     if(lane == warp_leader) {
@@ -627,17 +548,21 @@ __forceinline__
 
                     if(cl_id == (*way_key)){
                         hit = true;
-                        //memcpy
-                        void* src = ((void*)base_addr_)+ (set_offset + way) * CL_SIZE;
-                        //warp_memcpy<T>(src, output_ptr, CL_SIZE, mask);
-                        
-                        nvshmemx_float_put_warp(output_ptr, (float*) src, CL_SIZE/sizeof(float), dst_gpu);
-
-                        // if(rank == 0 && dst_gpu == 0){
-                        //     printf("id: %llu first val:%f\n", (unsigned long long) id, ( (float*)src)[0]);
-                        // }
-
-                        
+                        void* src ;
+                        //CPU memory
+                        if(way >= gpu_num_ways){
+                            src = ((void*)cpu_base_addr_)+ (cpu_set_offset + way - gpu_num_ways) * CL_SIZE;                   
+                        }
+                        else{
+                            src = ((void*)base_addr_)+ (gpu_set_offset + way) * CL_SIZE;
+                        }
+                        if(use_nvshmem){
+                            nvshmemx_float_put_warp(output_ptr, (float*) src, CL_SIZE/sizeof(float), dst_gpu);
+                        }
+                        else{
+                            warp_memcpy<float>(src, output_ptr, CL_SIZE, mask);
+                        }
+                    
 
                     }
                     __syncwarp(mask);
@@ -648,12 +573,11 @@ __forceinline__
                     }
                     way_after = __shfl_sync(mask, way_after, warp_leader);
 
-                    if(lane == warp_leader){
-                        if(hit && (way_after != way_before)){
-                            double_read.fetch_add(1, simt::memory_order_relaxed);
-                        }
-
-                    }
+                    // if(lane == warp_leader){
+                    //     if(hit && (way_after != way_before)){
+                    //         double_read.fetch_add(1, simt::memory_order_relaxed);
+                    //     }
+                    // }
 
 
                     if(!done)
@@ -661,7 +585,12 @@ __forceinline__
 
                     unsigned not_done_mask = __ballot_sync(mask, !done);
                     if(not_done_mask == 0){
-                        if(lane == warp_leader) hit_cnt.fetch_add(1, simt::memory_order_relaxed);
+                        if(lane == warp_leader) {
+                            if(is_gpu_cache)
+                                gpu_hit_cnt.fetch_add(1, simt::memory_order_relaxed);
+                            else
+                                cpu_hit_cnt.fetch_add(1, simt::memory_order_relaxed);
+                        }
                         return;
                     }
 
@@ -699,9 +628,26 @@ __forceinline__
         //printf("EVICT\n");
 
         uint32_t queue;
-        if(lane == warp_leader) {
-            queue = get_smid() % (d_ctrls_[0]->n_qps);
-            read_page(cl_id, set_offset + way, queue);
+        bool to_cpu = (way >= gpu_num_ways) ? true : false;
+        if(is_simulation){
+            void* src ;
+            if(way >= gpu_num_ways)
+                src = ((void*)cpu_base_addr_)+ (cpu_set_offset + way - gpu_num_ways) * CL_SIZE;                   
+            else{
+                src = ((void*)base_addr_)+ (gpu_set_offset + way) * CL_SIZE;
+            }
+            read_page_simulation(cl_id, src, mask);
+        }
+        else{
+            if(lane == warp_leader) {
+                queue = get_smid() % (d_ctrls_[0]->n_qps);
+                
+                if(to_cpu){
+                    read_page(cl_id, cpu_set_offset + way - gpu_num_ways, queue, to_cpu);
+                }
+                else
+                    read_page(cl_id, gpu_set_offset + way, queue, to_cpu);
+            }
         }
 
         __syncwarp(mask);
@@ -711,12 +657,26 @@ __forceinline__
         }
         __syncwarp(mask);
 
-        void* src = ((void*)base_addr_)+ (set_offset + way) * CL_SIZE;
-       // warp_memcpy<T>(src, output_ptr, CL_SIZE, mask);
-        nvshmemx_float_put_warp(output_ptr, (float*) src, CL_SIZE/sizeof(float), dst_gpu);
+         void* src ;
+        //CPU memory
+        if(way >= gpu_num_ways)
+            src = ((void*)cpu_base_addr_)+ (cpu_set_offset + way - gpu_num_ways) * CL_SIZE;                   
+        else{
+            src = ((void*)base_addr_)+ (gpu_set_offset + way) * CL_SIZE;
+        }
+        if(use_nvshmem){
+            nvshmemx_float_put_warp(output_ptr, (float*) src, CL_SIZE/sizeof(float), dst_gpu);
+        }
+        else{
+            warp_memcpy<float>(src, output_ptr, CL_SIZE, mask);
+        }
 
+        
         if(lane == warp_leader) {
-            miss_cnt.fetch_add(1, simt::memory_order_relaxed);
+            if(to_cpu)
+                cpu_miss_cnt.fetch_add(1, simt::memory_order_relaxed);
+            else
+                gpu_miss_cnt.fetch_add(1, simt::memory_order_relaxed);
             // if(evict_policy == 1 ){
             //     // STATIC INFO
             //     static_info_[set_offset+way] = static_info_ptr[b_id];
@@ -745,6 +705,9 @@ struct NVSHMEM_cache_handle{
 
     uint64_t num_sets_;
     uint64_t num_ways_;
+    uint64_t cpu_num_ways_;
+    uint64_t gpu_num_ways_;
+
     uint64_t CL_SIZE_;
 
 
@@ -756,7 +719,6 @@ struct NVSHMEM_cache_handle{
     Controller* ctrls_;
 
     DmaPtr pages_dma;
-    DmaPtr prp_list_dma;
     bool prps;
 
     uint8_t* base_addr;
@@ -779,46 +741,86 @@ struct NVSHMEM_cache_handle{
     unsigned int my_GPU_id_;
     unsigned num_gpus = 1;
     
+    DmaPtr cpu_pages_dma;
+    uint8_t* cpu_base_addr;
 
+    BufferPtr cpu_prp1_buf;
+    BufferPtr cpu_prp2_buf; 
 
+    bool is_simulation = false;
+    void* sim_buf;
 
     __host__ 
-    NVSHMEM_cache_handle(uint64_t num_sets, uint64_t num_ways, uint64_t cl_size, const Controller& ctrl, const std::vector<Controller*>& ctrls,  const uint32_t cudaDevice,
-                         unsigned int my_GPU_id, unsigned n_gpus) :
+    NVSHMEM_cache_handle(uint64_t num_sets, uint64_t  gpu_num_ways, uint64_t cl_size,/* const Controller& ctrl,*/ const std::vector<Controller*>& ctrls,  const uint32_t cudaDevice,
+                         unsigned int my_GPU_id, unsigned n_gpus,  uint64_t cpu_num_ways, bool simulation, void* sim_buf_ptr) :
     num_sets_(num_sets),
-    num_ways_(num_ways),
+    gpu_num_ways_(gpu_num_ways),
+    cpu_num_ways_(cpu_num_ways),
     CL_SIZE_(cl_size),
     my_GPU_id_(my_GPU_id),
-    num_gpus(n_gpus)
+    num_gpus(n_gpus),
+    is_simulation(simulation),
+    sim_buf(sim_buf_ptr)
     {
+       // auto ctrl = ctrls[0][0];
+        bool use_cpu_cache = false;
+        if(cpu_num_ways > 0){
+            use_cpu_cache = true;
+        }
+        
+        num_ways_ = gpu_num_ways_ + cpu_num_ways_;
         cudaSetDevice(cudaDevice);
 
         uint64_t* prp1;
         uint64_t* prp2;
 
-        printf("num sets: %llu num ways: %llu num_gpus in NVLink domain:%u \n", num_sets, num_ways, num_gpus);
+        uint64_t* cpu_prp1;
+        uint64_t* cpu_prp2;
+
+        printf("num sets: %llu num ways: %llu  gpu_ways: %llu cpu_ways: %llu  num_gpus in NVLink domain:%u \n", num_sets, num_ways_, gpu_num_ways, cpu_num_ways, num_gpus);
+
+        assert(num_ways_ != 0 && "Error: Variable 'ways' should not be zero.");
 
         cuda_err_chk(cudaMalloc((void**)&d_set_locks, sizeof(seqlock) * num_sets_));
-        cuda_err_chk(cudaMalloc((void**)&d_way_locks, sizeof(seqlock) * num_sets_ * num_ways_));
+        cuda_err_chk(cudaMalloc((void**)&d_way_locks, sizeof(seqlock) * num_sets_ * (num_ways_ )));
 
         cuda_err_chk(cudaMalloc((void**)&set_cnt_, sizeof(uint32_t) * num_sets_));
-        cuda_err_chk(cudaMalloc((void**)&keys_, sizeof(uint64_t) * num_sets_ * num_ways_));
+        cuda_err_chk(cudaMalloc((void**)&keys_, sizeof(uint64_t) * num_sets_ * (num_ways_ )));
 
         cuda_err_chk(cudaMemset(d_set_locks, 0, sizeof(seqlock) * num_sets_));
-        cuda_err_chk(cudaMemset(d_way_locks, 0, sizeof(seqlock) * num_sets_ * num_ways_));
+        cuda_err_chk(cudaMemset(d_way_locks, 0, sizeof(seqlock) * num_sets_ * (num_ways_ )));
         cuda_err_chk(cudaMemset(set_cnt_, 0, sizeof(uint32_t) * num_sets_));
-        cuda_err_chk(cudaMemset(keys_, 0xFF, sizeof(uint64_t) * num_sets_ * num_ways_));
+        cuda_err_chk(cudaMemset(keys_, 0xFF, sizeof(uint64_t) * num_sets_ * (num_ways_ )));
 
         cuda_err_chk(cudaMalloc((void**)&cache_ptr, sizeof(NVSHMEM_cache_d_t<T>)));
 
 
        
 
-        uint64_t cache_size = CL_SIZE_ * num_sets_ * num_ways_;
-        pages_dma = createDma(ctrl.ctrl, NVM_PAGE_ALIGN(cache_size, 1UL << 16), cudaDevice);
-        base_addr = (uint8_t*) pages_dma.get()->vaddr;
-        const uint32_t uints_per_page = ctrl.ctrl->page_size / sizeof(uint64_t);
+        uint64_t GPU_cache_size = CL_SIZE_ * num_sets_ * gpu_num_ways_;
+        uint64_t CPU_cache_size = CL_SIZE_ * num_sets_ * cpu_num_ways_;
 
+        if(is_simulation){
+            cuda_err_chk(cudaMalloc((void**)&base_addr, GPU_cache_size));
+            cuda_err_chk(cudaHostAlloc((void**)&cpu_base_addr, CPU_cache_size, cudaHostAllocDefault));
+        }
+        else{
+            const Controller& ctrl = ctrls[0][0]; 
+
+            if(gpu_num_ways_ > 0){
+                printf("GPU DMA setup\n");
+                pages_dma = createDma(ctrl.ctrl, NVM_PAGE_ALIGN(GPU_cache_size, 1UL << 16), cudaDevice);
+                base_addr = (uint8_t*) pages_dma.get()->vaddr;
+            }
+        // const uint32_t uints_per_page = ctrl.ctrl->page_size / sizeof(uint64_t);
+
+            if(use_cpu_cache){
+                printf("CPU DMA setup\n");
+                cpu_pages_dma = createDmaHost(ctrl.ctrl, NVM_PAGE_ALIGN(CPU_cache_size, 1UL << 16));
+                cpu_base_addr = (uint8_t*) cpu_pages_dma.get()->vaddr;
+            }
+        }
+        printf("DMA setup done\n");
 
         ctrl_counter_buf = createBuffer(sizeof(simt::atomic<uint64_t, simt::thread_scope_device>), cudaDevice);
         q_head_buf = createBuffer(sizeof(simt::atomic<uint64_t, simt::thread_scope_device>), cudaDevice);
@@ -826,11 +828,6 @@ struct NVSHMEM_cache_handle{
         q_lock_buf = createBuffer(sizeof(simt::atomic<uint64_t, simt::thread_scope_device>), cudaDevice);
         extra_reads_buf = createBuffer(sizeof(simt::atomic<uint64_t, simt::thread_scope_device>), cudaDevice);
         
-        // if(eviction_p == 1 || eviction_p == 3){
-        //     cudaMalloc((void**)&static_info_, (uint64_t) sizeof(uint8_t) * num_sets_ * num_ways_);
-        //     cudaMemset(static_info_, 0x0, (uint64_t) sizeof(uint8_t) * num_sets_ * num_ways_);
-        // }
-
         auto cache_ctrl_counter = (simt::atomic<uint64_t, simt::thread_scope_device>*)ctrl_counter_buf.get();
 
         auto cache_q_head = (simt::atomic<uint64_t, simt::thread_scope_device>*)q_head_buf.get();
@@ -842,43 +839,78 @@ struct NVSHMEM_cache_handle{
         uint32_t n_ctrls = ctrls.size();
         d_ctrls_buff = createBuffer(n_ctrls * sizeof(Controller*), cudaDevice);
         auto d_ctrls = (Controller**) d_ctrls_buff.get();
-        auto n_blocks_per_page = (CL_SIZE_/ctrl.blk_size);
+        uint64_t n_blocks_per_page = 0;
         
-        for (size_t k = 0; k < n_ctrls; k++)
-            cuda_err_chk(cudaMemcpy(d_ctrls+k, &(ctrls[k]->d_ctrl_ptr), sizeof(Controller*), cudaMemcpyHostToDevice));
-        
+        if(simulation == false){
+            const Controller& ctrl = ctrls[0][0]; 
 
-        if (CL_SIZE_ <= pages_dma.get()->page_size) {
-            std::cout << "Cond1\n";
+            
+            n_blocks_per_page = (CL_SIZE_/ctrl.blk_size);
+
+            for (size_t k = 0; k < n_ctrls; k++)
+                cuda_err_chk(cudaMemcpy(d_ctrls+k, &(ctrls[k]->d_ctrl_ptr), sizeof(Controller*), cudaMemcpyHostToDevice));
+            
             uint64_t how_many_in_one = ctrl.ctrl->page_size/CL_SIZE_;
 
-            this->prp1_buf = createBuffer(num_sets_ * num_ways_ * sizeof(uint64_t), cudaDevice);
-            prp1 = (uint64_t*) this->prp1_buf.get();
+            if(gpu_num_ways_ > 0){
+                if (CL_SIZE_ <= pages_dma.get()->page_size) {
+                    std::cout << "Setting GPU cache\n";
+                    this->prp1_buf = createBuffer(num_sets_ * gpu_num_ways_ * sizeof(uint64_t), cudaDevice);
+                    prp1 = (uint64_t*) this->prp1_buf.get();
 
-            std::cout << (num_sets_ * num_ways_) << " " << sizeof(uint64_t) << " " << how_many_in_one << " " << this->pages_dma.get()->n_ioaddrs <<std::endl;
-            uint64_t* temp = new uint64_t[how_many_in_one * pages_dma.get()->n_ioaddrs];
-            std::memset(temp, 0, how_many_in_one *  pages_dma.get()->n_ioaddrs);
+                    std::cout << (num_sets_ * gpu_num_ways_) << " " << sizeof(uint64_t) << " " << how_many_in_one << " " << this->pages_dma.get()->n_ioaddrs <<std::endl;
+                    uint64_t* temp = new uint64_t[how_many_in_one * pages_dma.get()->n_ioaddrs];
+                    std::memset(temp, 0, how_many_in_one *  pages_dma.get()->n_ioaddrs);
 
-            if (temp == NULL)
-                std::cout << "NULL\n";
+                    if (temp == NULL)
+                        std::cout << "NULL\n";
 
-            for (size_t i = 0; (i < this->pages_dma.get()->n_ioaddrs) ; i++) {
-                for (size_t j = 0; (j < how_many_in_one); j++) {
-                    temp[i*how_many_in_one + j] = ((uint64_t)this->pages_dma.get()->ioaddrs[i]) + j*CL_SIZE_;
+                    for (size_t i = 0; (i < this->pages_dma.get()->n_ioaddrs) ; i++) {
+                        for (size_t j = 0; (j < how_many_in_one); j++) {
+                            temp[i*how_many_in_one + j] = ((uint64_t)this->pages_dma.get()->ioaddrs[i]) + j*CL_SIZE_;
+                        }
+                    }
+                    cuda_err_chk(cudaMemcpy(prp1, temp, num_sets_ * gpu_num_ways_ * sizeof(uint64_t), cudaMemcpyHostToDevice));
+
+                    delete temp;
                 }
             }
-            cuda_err_chk(cudaMemcpy(prp1, temp, num_sets_ * num_ways_ * sizeof(uint64_t), cudaMemcpyHostToDevice));
 
-            delete temp;
-            prps = false;
+            if(cpu_num_ways_ > 0){
+                if (CL_SIZE_ <= cpu_pages_dma.get()->page_size) {
+                    std::cout << "Setting CPU cache\n";
+                    this->cpu_prp1_buf = createBuffer(num_sets_ * cpu_num_ways_ * sizeof(uint64_t));
+                    cpu_prp1 = (uint64_t*) this->cpu_prp1_buf.get();
+
+                    std::cout << (num_sets_ * cpu_num_ways_) << " " << sizeof(uint64_t) << " " << how_many_in_one << " " << this->cpu_pages_dma.get()->n_ioaddrs <<std::endl;
+                    uint64_t* cpu_temp = new uint64_t[how_many_in_one * cpu_pages_dma.get()->n_ioaddrs];
+                    std::memset(cpu_temp, 0, how_many_in_one *  cpu_pages_dma.get()->n_ioaddrs);
+
+                    if (cpu_temp == NULL)
+                        std::cout << "NULL\n";
+
+                    for (size_t i = 0; (i < this->cpu_pages_dma.get()->n_ioaddrs) ; i++) {
+                        for (size_t j = 0; (j < how_many_in_one); j++) {
+                            cpu_temp[i*how_many_in_one + j] = ((uint64_t)this->cpu_pages_dma.get()->ioaddrs[i]) + j*CL_SIZE_;
+                        }
+                    }
+                    cuda_err_chk(cudaMemcpy(cpu_prp1, cpu_temp, num_sets_ * cpu_num_ways_ * sizeof(uint64_t), cudaMemcpyHostToDevice));
+
+                    delete cpu_temp;
+
+                }
+                
+            }
         }
+        prps = false;
 
-        NVSHMEM_cache_d_t<T> cache_host(d_set_locks, d_way_locks, num_sets_, num_ways_, CL_SIZE_, keys_, set_cnt_, d_ctrls, n_ctrls, n_blocks_per_page, base_addr, prp1, prp2, prps,
+        NVSHMEM_cache_d_t<T> cache_host(d_set_locks, d_way_locks, num_sets_, gpu_num_ways_, CL_SIZE_, keys_, set_cnt_, d_ctrls, n_ctrls, n_blocks_per_page, base_addr, prp1, prp2, prps,
         cache_q_head, cache_q_tail, cache_q_lock, cache_extra_reads, 
-        my_GPU_id_, num_gpus);
+        my_GPU_id_, num_gpus, cpu_num_ways_, cpu_base_addr, cpu_prp1, is_simulation, sim_buf);
 
 
         cuda_err_chk(cudaMemcpy(cache_ptr, &cache_host, sizeof(NVSHMEM_cache_d_t<T>), cudaMemcpyHostToDevice));
+        std::cout << "Cache Device Setting Done\n";
     }
 
     __host__ 

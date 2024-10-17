@@ -11,7 +11,9 @@ __global__ void NVShmem_read_feature_kernel(NVSHMEM_cache_d_t<T> *cache, T *out_
     uint64_t row_index = index_ptr[idx_idx];
     uint64_t tid = threadIdx.x % 32;
 
-    cache->get_data(row_index, out_tensor_ptr + (bid * num_warps + warp_id) * dim, idx_idx, nullptr);
+    //cache->get_data(row_index, out_tensor_ptr + (bid * num_warps + warp_id) * dim, idx_idx, nullptr);
+    cache->get_data(row_index, out_tensor_ptr + (bid * num_warps + warp_id) * dim);
+
   } 
 }
 
@@ -30,14 +32,12 @@ __global__ void NVShmem_dist_read_feature_kernel(int gpu_id, NVSHMEM_cache_d_t<T
     int64_t batch_idx = nvshmem_index_ptr[idx_idx*2 + 1];
     uint64_t tid = threadIdx.x % 32;
 
-    cache->dist_get_data(row_index, out_tensor_ptr + (batch_idx) * dim, rank, gpu_id);
-    // if(rank == 0 && gpu_id == 0 && (threadIdx.x % 32 == 0)){
-      
-    //   printf("row_index: %lli first val:%f\n", (unsigned long long) row_index, (out_tensor_ptr + (batch_idx) * dim)[0]);
-    // }
-    // if(rank == 1 && gpu_id == 0 && (threadIdx.x % 32 == 0)){
-    //  printf("RANK 1 Writes row_index: %lli\n", (unsigned long long) row_index);
-    // }
+
+    //get_data( uint64_t id, T* output_ptr, bool use_nvshmem = false, int rank = 0, int dst_gpu = 0){
+
+    //cache->dist_get_data(row_index, out_tensor_ptr + (batch_idx) * dim, rank, gpu_id);
+    cache->get_data(row_index, out_tensor_ptr + (batch_idx) * dim, true, rank, gpu_id);
+
   } 
 }
 
