@@ -35,7 +35,7 @@ find_package(pybind11 REQUIRED)
 FIND_PACKAGE(PythonInterp 3 REQUIRED)
 FIND_PACKAGE(PythonLibs   3 REQUIRED)
 
-
+find_package(MPI REQUIRED REQUIRED)
 # #IF( PYTHONINTERP_FOUND AND PYTHONLIBS_FOUND AND PYBIND11_FOUND )
 #   INCLUDE_DIRECTORIES(
 #     ${PYTHON_INCLUDE_DIRS}
@@ -43,12 +43,13 @@ FIND_PACKAGE(PythonLibs   3 REQUIRED)
 #   )
 
 
-set(NVSHMEM_HOME "/u/jpark346")
+set(NVSHMEM_HOME "/u/jpark346/nvshmem")
+set(MPI_HOME "/sw/spack/deltas11-2023-03/apps/linux-rhel8-zen3/gcc-11.4.0/openmpi-4.1.6-lranp74/") 
 file(GLOB NVSHMEM_LIBRARIES "${NVSHMEM_HOME}/lib/libnvshmem_host.so" "${NVSHMEM_HOME}/lib/libnvshmem_device.a")
 
 
 include_directories(${NVSHMEM_HOME}/include  ${PYTHON_INCLUDE_DIRS} /usr/local/cuda/include  ./include ../bam/include ../bam/include/freestanding/include/ /usr/mpi/gcc/openmpi-4.1.5a1/include)
-link_directories(${NVSHMEM_HOME}/lib /usr/local/cuda/lib64 ${CMAKE_CURRENT_SOURCE_DIR}/../bam/build/lib/libnvm.so )
+link_directories(${NVSHMEM_HOME}/lib /usr/local/cuda/lib64 ${CMAKE_CURRENT_SOURCE_DIR}/../bam/build/lib/libnvm.so ${MPI_HOME}/lib)
 
 
 add_library(Dist_Cache MODULE gids_nvme.cu)
@@ -61,6 +62,7 @@ set_target_properties(Dist_Cache PROPERTIES
 
 target_compile_options(Dist_Cache PRIVATE
     $<$<COMPILE_LANGUAGE:CUDA>:
+    -std=c++17;
     -rdc=true;
     -O3;
     -gencode=arch=compute_80,code=sm_80;
@@ -68,7 +70,7 @@ target_compile_options(Dist_Cache PRIVATE
     >
 )
 
-target_link_libraries(Dist_Cache PRIVATE   ${NVSHMEM_LIBRARIES} cuda cudart pybind11::module)
+target_link_libraries(Dist_Cache PRIVATE   ${NVSHMEM_LIBRARIES} cuda cudart pybind11::module ${MPI_LIBRARIES})
 
 SET_TARGET_PROPERTIES( Dist_Cache
   PROPERTIES

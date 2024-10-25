@@ -4,7 +4,7 @@ import numpy as np
 import ctypes
 import nvtx 
 
-import BAM_Feature_Store
+#import BAM_Feature_Store
 #from BAM_Feature_Store import Emulate_SA
 
 
@@ -33,8 +33,11 @@ import torch.distributed as dist
 
 from collections import Counter
 
-import nvshmem_manager
+#import nvshmem_manager
 import cupy as cp
+import os
+import threading
+import sys
 
 
 class  Emulate_Cache_CollateWrapper(object):
@@ -78,6 +81,9 @@ class  Emulate_Cache_CollateWrapper(object):
                 self.Emul_SA_list[i].read_feature_with_color(return_torch.data_ptr(), index.data_ptr(), index_size, self.dim, self.cache_dim, 0, 0, color_tensor.data_ptr())                 
 
         return init_batch
+
+# class Pinned_Tensor_Manager(object):
+#     def __init__(self, ptr: int, batch_nbytes: int):
 
 
 class NVShmem_Tensor_Manager(object):
@@ -131,13 +137,227 @@ class CollateWrapper(object):
 
 
     def __call__(self, items):
+        #print("items: ", items)
         graph_device = getattr(self.g, 'device', None)   
-        item_test = items.to(self.device)
 
         items = recursive_apply(items, lambda x: x.to(self.device))
         batch = self.sample_func(self.g, items)
         batch = recursive_apply(batch, remove_parent_storage_columns, self.g)
         return batch
+
+
+class S3D_Communication_Protocol(object):
+    def __init__(self, NVSHMEM_Cache ,comm_wraper, batch_size):
+        print("S3D communication init starts")
+        self.system_rank = comm_wraper[0]
+
+        self.local_gloo = comm_wraper[1]
+        self.local_gather_gloo = comm_wraper[2]
+        self.local_gloo_world_size = comm_wraper[3]
+        self.local_gloo_rank = comm_wraper[4]
+        self.local_master = comm_wraper[5]
+        self.is_master = comm_wraper[6]
+        
+        self.system_gloo = comm_wraper[7]
+        self.system_gloo_world_size = comm_wraper[8]
+        self.system_gloo_rank = comm_wraper[9]
+
+
+        self.NVSHMEM_Cache = NVSHMEM_Cache
+   
+
+        self.domain_batch_size = int(batch_size * self.local_gloo_world_size)
+        self.batch_size = batch_size
+        self.parsed_training_nodes_1 = torch.zeros(self.domain_batch_size, dtype=torch.int64)
+        self.parsed_training_nodes_2 = torch.zeros(self.domain_batch_size, dtype=torch.int64)
+        
+        self.parsed_training_nodes_src = torch.zeros(self.domain_batch_size, dtype=torch.int64)
+
+        self.parsed_training_nodes_header = 0
+
+        self.first_iter = True
+
+    def setup_index(self, index, reset_counter, batch_size):
+        self.reset_counter = reset_counter
+        self.index_buffer = index.clone().detach() 
+        self.index_offset = 0
+        self.batch_size = batch_size
+
+        self.domain_index_buffer = [None, None]
+        self.domain_index_buffer_head = 0
+
+        self.num_colors = self.NVSHMEM_Cache.get_num_colors()
+        print(f"Number of colors: {self.num_colors}")
+        #if(self.is_master == True):
+        self.gather_list_1 = [torch.zeros(self.num_colors, dtype=torch.int32) for _ in range(self.system_gloo_world_size)]
+        self.gather_list_2 = [torch.zeros(self.num_colors, dtype=torch.int32) for _ in range(self.system_gloo_world_size)]
+
+        self.gather_list_header = 1
+
+ 
+
+
+    def gather_cache_meta(self, gpu_cache_meta):
+        #torch.distributed.reduce(tensor, dst, op=ReduceOp.SUM, group=None, async_op=False)
+        dist.all_reduce(gpu_cache_meta, op=dist.ReduceOp.SUM, group=self.local_gather_gloo)
+        dist.barrier(group=self.local_gather_gloo) 
+        if(self.is_master):
+            #print(f"Rank: {self.system_rank} cache_meta: {gpu_cache_meta}")
+            if(self.gather_list_header == 1):
+                #print(f"Rank:  {self.system_rank} Header 1")
+                dist.all_gather(self.gather_list_1, gpu_cache_meta, group=self.system_gloo)
+            else:
+                #print(f"Rank:  {self.system_rank} Header 0")
+                dist.all_gather(self.gather_list_0, gpu_cache_meta, group=self.system_gloo)
+
+
+    def parse_domain_training_nodes(self):
+        # Parse\            
+        domain_batch_size = self.domain_batch_size
+
+        if(self.is_master):
+            domain_id = self.system_gloo_rank
+            system_world_size = self.system_gloo_world_size
+            #Parse
+            for i in range(domain_batch_size):
+                if( self.parsed_training_nodes_header == 0):
+                    self.parsed_training_nodes_1[i] = self.index_buffer[self.index_offset + system_world_size*i + domain_id]
+                else:
+                    self.parsed_training_nodes_2[i] = self.index_buffer[self.index_offset + system_world_size*i + domain_id]
+        
+        if( self.parsed_training_nodes_header == 0):
+            #print(f"Rank: {self.system_rank} local master: {self.local_master} broadcast 1 {self.parsed_training_nodes_1} ")
+            dist.broadcast(self.parsed_training_nodes_1, src=self.local_master, group=self.local_gloo)
+        else:
+            #print(f"Rank: {self.system_rank} local master: {self.local_master} broadcast 2 {self.parsed_training_nodes_1}")
+            dist.broadcast(self.parsed_training_nodes_2, src=self.local_master, group=self.local_gloo)
+
+        #print(f"Rank: {self.system_rank} broadcast done")
+        self.index_offset += int(domain_batch_size * self.system_gloo_world_size )
+
+        
+
+
+
+
+
+class Timer(object):
+    def __init__(self):
+        self.cache_meta_transfer_time = 0.0
+        self.sampling_time = 0.0
+        self.send_request_time = 0.0
+        self.fetch_time = 0.0
+
+    def print_times(self):
+        print(f"Sampling Time: {self.sampling_time} Send request Time: {self.send_request_time}  Fetch Time: {self.fetch_time}  Cache Transfer Time: {self.cache_meta_transfer_time}")
+        self.cache_meta_transfer_time = 0.0
+        self.sampling_time = 0.0
+        self.send_request_time = 0.0
+        self.fetch_time = 0.0
+
+
+class SSD_GNN_CollateWrapper(object):
+    def __init__(self, NVSHMEM_Cache, Timer, sample_func, g,  device, comm_protocol, reset_counter, num_iterations):
+        self.sample_func = sample_func
+        self.g = g
+        self.device = device
+        self.pin_memory = True
+
+        self.read_counter = 0
+        self.reset_counter = reset_counter
+
+        self.comm_protocol =  comm_protocol 
+
+        self.system_gloo_thread = None
+
+        self.system_gloo_buffer_ptr = 0
+
+        print(f"SSD reset time: {reset_counter}")
+
+        self.NVSHMEM_Cache = NVSHMEM_Cache
+
+        self.num_colors = NVSHMEM_Cache.get_num_colors()
+        self.cache_meta_tensor = torch.zeros(self.num_colors, dtype=torch.int32)
+
+        self.Timer = Timer
+        self.num_iterations = num_iterations
+        self.cur_iteration = 0
+
+        self.gloo_gather_thread = None
+        self.distribute_thread = None
+
+
+
+    def __call__(self, items):
+
+        if(self.distribute_thread == None):
+            self.distribute_thread = threading.Thread(target=self.comm_protocol.parse_domain_training_nodes)
+            self.distribute_thread.start()
+            self.cur_iteration += 1
+                
+
+        self.distribute_thread.join()
+
+        if(self.comm_protocol.parsed_training_nodes_header == 0):
+            cur_index = self.comm_protocol.parsed_training_nodes_1
+            self.comm_protocol.parsed_training_nodes_header = 1
+        else:
+            cur_index = self.comm_protocol.parsed_training_nodes_2
+            self.comm_protocol.parsed_training_nodes_header = 0
+
+        #chunk cur_index
+        #print(f"Rank: {self.comm_protocol.system_rank} cur_index: {cur_index}")
+
+        if(self.read_counter == self.reset_counter):
+            if(self.gloo_gather_thread != None):
+                self.gloo_gather_thread.join()
+                if(self.comm_protocol.is_master):
+                    if(self.comm_protocol.gather_list_header == 1):
+                        #print(f"gather list: {self.comm_protocol.gather_list_1}")
+                        self.gather_list_header = 0
+                    else:
+                        #print(f"gather list: {self.comm_protocol.gather_list_0}")
+                        self.gather_list_header = 1
+
+            self.read_counter = 0
+
+            time_start = time.time()            
+            self.NVSHMEM_Cache.get_cache_data(self.cache_meta_tensor.data_ptr())
+            self.Timer.cache_meta_transfer_time += (time.time() - time_start)
+
+            self.gloo_gather_thread = threading.Thread(target=self.comm_protocol.gather_cache_meta, args=(self.cache_meta_tensor,))
+            self.gloo_gather_thread.start()
+
+
+    #     # distribute Node
+
+   
+        if(self.cur_iteration < self.num_iterations):
+            self.distribute_thread = threading.Thread(target=self.comm_protocol.parse_domain_training_nodes)
+            self.distribute_thread.start()
+            self.cur_iteration += 1
+
+        graph_device = getattr(self.g, 'device', None)   
+
+        rank_idx =  self.comm_protocol.local_gloo_rank
+        idx_list = cur_index[int(rank_idx * self.comm_protocol.batch_size):int((rank_idx+1) * self.comm_protocol.batch_size)]
+        idx_list = idx_list.to(self.device)
+        idx_list = recursive_apply(idx_list, lambda x: x.to(self.device))
+        batch = self.sample_func(self.g, idx_list)
+
+        # items = recursive_apply(items, lambda x: x.to(self.device))
+        # batch = self.sample_func(self.g, items)
+        # batch = recursive_apply(batch, remove_parent_storage_columns, self.g)
+
+        self.read_counter += 1
+        return batch
+    
+    def clean_up (self):
+        if(self.distribute_thread != None):
+            self.distribute_thread.join()
+
+        self.cur_iteration = 0
+        
 
 
 class GIDS_NVShmem_Loader_PrefetchingIter(object):
@@ -151,9 +371,19 @@ class GIDS_NVShmem_Loader_PrefetchingIter(object):
         return self
 
     def __next__(self):
+        #print("Data loader ", self.dataloader_it._dataset._indices[8:16])
+        # for i in range(8):
+        #     self.dataloader_it._dataset._indices[i+8] = 100 + i
         cur_it = self.dataloader_it
         batch = self.GIDS_Loader.fetch_feature(self.dataloader.dim, cur_it, self.GIDS_Loader.gids_device)
         return batch
+
+    def __del__(self):
+        # Cleanup actions, such as releasing resources
+        print("GIDS_NVShmem_Loader_PrefetchingIter is being destroyed")
+        self.dataloader.collate_wrapper.clean_up()
+        self.dataloader.GIDS_Loader.comm_protocol.index_offset = 0
+
 
 
 
@@ -164,6 +394,8 @@ class GIDS_NVShmem_Loader(torch.utils.data.DataLoader):
                  use_alternate_streams=None, 
                  
                  nvshmem_batch = None,
+                 #distribute parameters
+                 reset_time = 2,
                  **kwargs):
 
         self.nvshmem_batch = None
@@ -175,6 +407,10 @@ class GIDS_NVShmem_Loader(torch.utils.data.DataLoader):
 
         use_uva = True
         self.GIDS_Loader = GIDS
+        
+        mpi_rank = self.GIDS_Loader.NVSHMEM_Cache.MPI_get_rank()
+        print(f"MPI Rank: {mpi_rank} indicies: ",indices )
+        self.GIDS_Loader.comm_protocol.setup_index(indices, reset_time, batch_size)
         self.dim = dim
 
         if isinstance(kwargs.get('collate_fn', None), CollateWrapper):
@@ -257,11 +493,21 @@ class GIDS_NVShmem_Loader(torch.utils.data.DataLoader):
         if (torch.is_tensor(indices) or (
                 isinstance(indices, Mapping) and
                 all(torch.is_tensor(v) for v in indices.values()))):
+            
+            idx_len = len(indices)
+            my_idx_len = int(idx_len / self.GIDS_Loader.global_world_size)
+            indices = indices[:my_idx_len]
             self.dataset = create_tensorized_dataset(
                 indices, batch_size, drop_last, use_ddp, ddp_seed, shuffle,
                 kwargs.get('persistent_workers', False))
         else:
             self.dataset = indices
+
+
+        self.num_iterations = int(my_idx_len/batch_size)
+
+
+        #self.dataset = indices
 
         self.ddp_seed = ddp_seed
         self.use_ddp = use_ddp
@@ -277,11 +523,11 @@ class GIDS_NVShmem_Loader(torch.utils.data.DataLoader):
         worker_init_fn = WorkerInitWrapper(kwargs.get('worker_init_fn', None))
 
         self.other_storages = {}
-
+        self.collate_wrapper = SSD_GNN_CollateWrapper(self.GIDS_Loader.NVSHMEM_Cache, self.GIDS_Loader.timer,
+                self.graph_sampler.sample, graph, self.device, self.GIDS_Loader.comm_protocol, reset_time, self.num_iterations)
         super().__init__(
             self.dataset,
-            collate_fn=CollateWrapper(
-                self.graph_sampler.sample, graph, self.device),
+            collate_fn= self.collate_wrapper,
             batch_size=None,
             pin_memory=False,
             worker_init_fn=worker_init_fn,
@@ -300,7 +546,7 @@ class GIDS_NVShmem_Loader(torch.utils.data.DataLoader):
     def print_timer(self):
         self.sample_time = 0.0
         self.graph_travel_time = 0.0
-
+        self.GIDS_Loader.timer.print_times()
 
 
 
@@ -323,17 +569,33 @@ class NVSHMEM_GIDS():
         nvshmem_test = False,
         is_simulation = False,
         feat_file = "",
-        feat_off = 0):
+        feat_off = 0,
+        use_color_data = False,
+        color_file = "",
+        topk_file = "",
+        comm_wrapper = None,
+        global_world_size = 1
+        ):
 
  
+        self.global_world_size = global_world_size
         #DDP parameters
         self.use_ddp = use_ddp
         self.use_nvshmem_tensor = use_nvshmem_tensor
 
 
+        self.comm_wrapper = comm_wrapper
+
+        print(f"comm wrapper: {comm_wrapper}")
+        self.timer = Timer()
+
         self.is_simulation = is_simulation
         self.feat_file = feat_file
         self.feat_off = feat_off
+
+        self.use_color_data = use_color_data
+        self.color_file = color_file
+        self.topk_file = topk_file
         # Flag for NVshme Tensor Micro benchmark
         self.nvshmem_test = nvshmem_test
 
@@ -354,19 +616,15 @@ class NVSHMEM_GIDS():
         print("max sample size: ", self.max_sample_size)
 
         self.cache_per_GPU = 1
-        self.NVSHMEM_Cache.init()
+        self.NVSHMEM_Cache.init(0)
         self.rank = self.NVSHMEM_Cache.get_rank()
         self.world_size = self.NVSHMEM_Cache.get_world_size()
         self.mype_node = self.NVSHMEM_Cache.get_mype_node()
 
-        if(self.use_nvshmem_tensor or self.nvshmem_test):
-            #self.NVshmem_manager =  nvshmem_manager.NVSHMEMWrapper()
-       
+        self.comm_protocol = S3D_Communication_Protocol(self.NVSHMEM_Cache, self.comm_wrapper, batch_size)
 
-            # self.NVSHMEM_Cache.init()
-            # self.rank = self.NVSHMEM_Cache.get_rank()
-            # self.world_size = self.NVSHMEM_Cache.get_world_size()
-            # self.mype_node = self.NVSHMEM_Cache.get_mype_node()
+        if(self.use_nvshmem_tensor or self.nvshmem_test):
+           
             self.cache_per_GPU = self.world_size
             
             nbytes = int(self.max_sample_size * 4 * dim)
@@ -458,6 +716,11 @@ class NVSHMEM_GIDS():
     def get_world_size(self):
         return self.world_size 
 
+    def MPI_get_rank(self):
+        return  self.NVSHMEM_Cache.MPI_get_rank()
+    def MPI_get_world_size(self):
+        return  self.NVSHMEM_Cache.MPI_get_world_size()
+
     def init_cache(self, device_id, ssd_list = None):
 
         self.gids_device="cuda:" + str(device_id)
@@ -471,7 +734,9 @@ class NVSHMEM_GIDS():
 
         print("SSD list: ", self.ssd_list, " Device id: ", device_id)
         self.GIDS_controller.init_GIDS_controllers(self.num_ssd, 1024, 128, self.ssd_list, device_id, self.is_simulation)
-        self.NVSHMEM_Cache.init_cache(self.GIDS_controller, self.page_size, self.off, self.GPU_cache_size, self.CPU_cache_size, self.cache_per_GPU, self.num_ele, self.num_ssd, self.num_ways, self.is_simulation, self.feat_file, self.feat_off)
+        self.NVSHMEM_Cache.init_cache(self.GIDS_controller, self.page_size, self.off, self.GPU_cache_size, self.CPU_cache_size, self.cache_per_GPU, self.num_ele, self.num_ssd, self.num_ways, self.is_simulation, self.feat_file, self.feat_off,
+             self.use_color_data, self.color_file, self.topk_file
+        )
     
     
     #Fetching Data from the SSDs
@@ -486,6 +751,7 @@ class NVSHMEM_GIDS():
     def Dist_Cache_fetch_feature(self, dim, it, device):
         GIDS_time_start = time.time()
         batch = next(it)
+        self.timer.sampling_time += (time.time() - GIDS_time_start)
         if(self.heterograph):
             print("HETERO GRAPH IS NOT SUPPORT YET")
             return batch
@@ -495,22 +761,20 @@ class NVSHMEM_GIDS():
             index_size = len(index)
             index_ptr = index.data_ptr()
 
+            
+            send_start = time.time()
             return_torch_shape = [index_size,dim]
             return_torch = self.NVshmem_tensor_manager.get_batch_tensor(return_torch_shape)
             return_torch_ptr = self.NVshmem_tensor_manager.get_batch_tensor_ptr()
 
             request_tensor_ptr = self.NVshmem_tensor_manager.get_index_tensor_ptr()
             self.NVSHMEM_Cache.send_requests(index_ptr, index_size, request_tensor_ptr, self.max_sample_size)
-            
-            #self.NVshmem_manager.send_requests(index_ptr, index_size, request_tensor_ptr)
-            #self.NVshmem_manager.NVshmem_quiet()
-
-            # it = self.NVshmem_tensor_manager.get_index_tensor().to("cpu")
-            # print(f"Rank: {self.rank} Request Split: {it}")
+            self.timer.send_request_time += (time.time() - send_start)
 
 
+            fetch_start = time.time()
             self.NVSHMEM_Cache.dist_read_feature(return_torch_ptr, request_tensor_ptr, self.max_sample_size, dim, self.cache_dim)
-            self.GIDS_time += time.time() - GIDS_time_start
+            self.timer.fetch_time += (time.time() - fetch_start)
 
             # if(self.rank == 0):
             #     cpu_index = index.to("cpu")
@@ -526,8 +790,7 @@ class NVSHMEM_GIDS():
         GIDS_time_start = time.time()
 
         batch = next(it)
-
-  
+        self.timer.sampling_time += (time.time() - GIDS_time_start)
      
         if(self.heterograph):
             print("HETERO GRAPH IS NOT SUPPORT YET")
@@ -535,6 +798,7 @@ class NVSHMEM_GIDS():
 
         else:
             index = batch[0].to(self.gids_device)
+            print("indx: ", index)
             index_size = len(index)
             index_ptr = index.data_ptr()
 
