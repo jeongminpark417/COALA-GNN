@@ -465,8 +465,9 @@ struct NVSHMEM_cache_d_t {
     __device__
     void read_page_simulation(uint64_t pg_id, void* dst, uint32_t mask){
 
-//        void* src = sim_buf + pg_id * CL_SIZE;
-//         warp_memcpy<float>(src, dst, CL_SIZE, mask);
+        __nanosleep(1000*10);
+       void* src = sim_buf + (pg_id % 1024) * CL_SIZE;
+        warp_memcpy<float>(src, dst, CL_SIZE, mask);
 
         return;
     }
@@ -588,13 +589,13 @@ struct NVSHMEM_cache_d_t {
 
         if(lane == warp_leader) {
             if(color_track_){
-                if(color_meta_[set_offset + way] != 0){
-                    int32_t prev = atomicSub(&(color_counters[color_meta_[set_offset + way]]), 1); 
+                //if(color_meta_[set_offset + way] != 0){
+                int32_t prev = atomicSub(&(color_counters[color_meta_[set_offset + way]]), 1); 
                     // if(prev == 0){
                     //     uint64_t c = color_meta_[set_offset + way];
                     //     printf("color:%llu wrong\n ", (unsigned long long) c);
                     // }
-                }
+                //}
             }
             (cur_cl_seqlock + way) -> write_busy_lock();
         }
@@ -757,7 +758,8 @@ struct NVSHMEM_cache_handle{
     my_GPU_id_(my_GPU_id),
     num_gpus(n_gpus),
     is_simulation(simulation),
-    sim_buf(sim_buf_ptr)
+    sim_buf(sim_buf_ptr),
+    num_color_(num_colors)
     {
        // auto ctrl = ctrls[0][0];
         bool use_cpu_cache = false;

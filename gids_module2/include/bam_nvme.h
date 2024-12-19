@@ -137,9 +137,14 @@ struct NVSHMEM_Cache {
     int64_t* topk_buffer_ptr = nullptr;
     std::vector<int> topk_shape;
 
+    char* score_ptr = nullptr;
+    double* score_buffer_ptr = nullptr;
+
+
+
 
     void init_cache(Dist_GIDS_Controllers GIDS_ctrl, uint32_t ps, uint64_t read_off, uint64_t gpu_cache_size, uint64_t cpu_cache_size, uint32_t num_gpus, uint64_t num_ele, uint64_t num_ssd, uint64_t ways, bool is_simulation, const std::string &feat_file, int off,
-                    bool use_color_data, const std::string &color_file, const std::string &topk_file);
+                    bool use_color_data, const std::string &color_file, const std::string &topk_file, const std::string &score_file);
     void read_feature(uint64_t i_ptr, uint64_t i_index_ptr, int64_t num_index, int dim, int cache_dim);
     void dist_read_feature(uint64_t i_return_tensor_ptr, uint64_t i_nvshmem_index_ptr, int64_t max_index, int dim, int cache_dim);
 
@@ -147,7 +152,18 @@ struct NVSHMEM_Cache {
     void update_NVshmem_metadata(int my_rank, int num_ranks, int pe_node);
     void send_requests(uint64_t i_src_index_ptr, int64_t num_index, uint64_t i_nvshmem_request_ptr, int max_index);
 
+    void distribute_node_with_affinity(uint64_t i_item_ptr, uint64_t offset, uint64_t item_len, uint64_t i_parsed_ptr, const std::vector<uint64_t>&  meta_data_list, int batch_size, int num_parts, int domain_id);
 
+    //LSM-GNN Test function
+    void split_node_list(uint64_t i_index_ptr, int64_t index_size, uint64_t i_output_index_ptr,  uint64_t i_meta_ptr,                         
+                                          uint64_t i_index_counter_list, int64_t num_gpu, uint64_t max_sample_size);
+
+    void read_feature_nccl_backend(const std::vector<uint64_t>& gathered_idx_ptr_list, const std::vector<uint64_t>& gathered_ten_ptr_list,
+                                     const std::vector<uint64_t>& counter_list, int dim, int cache_dim, int64_t num_gpu);
+
+    void map_feat_data(uint64_t i_return_ptr, const std::vector<uint64_t>& gathered_ten_ptr_list, uint64_t i_map_tensor_ptr, 
+                                        const std::vector<uint64_t>& counter_list, int64_t dim, int64_t num_gpu);
+  
     //py::array_t<int32_t> get_cache_data();
     void get_cache_data(int64_t ret_i_ptr);
     int get_num_colors();

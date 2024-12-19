@@ -121,3 +121,38 @@ test_read_kernel(int64_t* ptr, int max_index){
   }
 }
 
+
+template <typename T = float>
+__global__ void 
+split_node_list_kernel(int64_t* index_ptr, uint64_t* dist_index_ptr,  uint64_t* index_pointer_list,  int64_t num_gpu, int64_t index_size, 
+    uint64_t* meta_buffer_ptr, uint64_t max_sample_size){
+  
+  uint64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+
+  if(idx < index_size){
+    int64_t cur_node = index_ptr[idx];
+    int64_t gpu_id = cur_node % num_gpu;
+    unsigned long long int enq_idx = atomicAdd((unsigned long long int*) (index_pointer_list + gpu_id), (unsigned long long int)1);
+
+    dist_index_ptr[max_sample_size * gpu_id + enq_idx] = cur_node;
+    meta_buffer_ptr[max_sample_size * gpu_id + enq_idx] = idx;
+
+
+    // int64_t* dist_index = (int64_t*) (dist_index_ptr[gpu_id]);
+    // uint64_t* meta_buffer = (uint64_t*) (meta_buffer_ptr[gpu_id]);
+    // meta_buffer[enq_idx] = idx;
+    // dist_index[enq_idx] = cur_node;
+  }
+}
+template <typename T = float>
+__global__ void  
+map_kernel (T* return_ptr, T* input_ptr, int64_t* map_tensor_ptr, int64_t count, int64_t dim, int64_t num_gpu, int64_t my_gpu){
+
+  uint64_t cur_idx = blockIdx.x;
+  int64_t output_idx =   map_tensor_ptr[cur_idx];
+
+  for(int i = threadIdx.x; i < dim; i += blockDim.x){
+    return_ptr[output_idx * dim + i] = input_ptr[cur_idx * dim + i];
+  }
+
+}

@@ -67,8 +67,8 @@ char* load_file_to_memory(const std::string& file_path, size_t& file_size) {
     return buffer;
 }
 
-
-void  parse_numpy_file(const std::string &color_file, int dim, char*& ret_buffer, int64_t*& ret_buffer_ptr, std::vector<int>& shape){
+template<typename T>
+void  parse_numpy_file(const std::string &color_file, int dim, char*& ret_buffer, T*& ret_buffer_ptr, std::vector<int>& shape){
   size_t file_size;
   
   char* buffer = load_file_to_memory(color_file, file_size);
@@ -132,11 +132,12 @@ void  parse_numpy_file(const std::string &color_file, int dim, char*& ret_buffer
 
   if (std::regex_search(header, match, dtype_regex)) {
       auto dtype= match[1].str();
-      assert(dtype == "<i8" && "The dtype is not '<i8'. This program only supports 64-bit integers.");
+      std::cout << "dtype: " << dtype << std::endl;
+      assert((dtype == "<i8" || dtype == "<f8") && "The dtype is not '<i8'. This program only supports 64-bit integers.");
   }
 
   ret_buffer = buffer;
-  ret_buffer_ptr = (int64_t*) buffer_ptr;
+  ret_buffer_ptr = (T*) buffer_ptr;
 
   return;
 
@@ -145,7 +146,7 @@ void  parse_numpy_file(const std::string &color_file, int dim, char*& ret_buffer
 template <typename TYPE>
 void NVSHMEM_Cache<TYPE>::init_cache(Dist_GIDS_Controllers GIDS_ctrl, uint32_t ps, uint64_t read_off, uint64_t gpu_cache_size, uint64_t cpu_cache_size, uint32_t num_gpus, uint64_t num_ele, uint64_t num_ssd, uint64_t n_ways, bool is_simulation,
                                       const std::string &feat_file, int file_off,
-                                      bool use_color_data, const std::string &color_file, const std::string &topk_file
+                                      bool use_color_data, const std::string &color_file, const std::string &topk_file, const std::string &score_file
                                      ) {
 
   num_eles = num_ele;
@@ -185,50 +186,60 @@ void NVSHMEM_Cache<TYPE>::init_cache(Dist_GIDS_Controllers GIDS_ctrl, uint32_t p
   std::cout << "Total ways: " << num_ways  << std::endl;
   std::cout << "Simulation: " << is_simulation << std::endl;
 
-/*
+
   if(is_simulation){
-    std::ifstream file(feat_file, std::ios::binary | std::ios::ate);
-    if (!file.is_open()) {
-        std::cerr << "Failed to open file: " << feat_file << std::endl;
-        return ;
-    }
 
-    std::cout << "File: " << feat_file << " is opend\n";
-    // Get the size of the file
-    std::streamsize file_size = file.tellg();
-    file.seekg(0, std::ios::beg);
-
-    std::streamsize remaining_size = file_size - file_off;
-
-    // Move the file pointer to the N-th byte
-    file.seekg(file_off, std::ios::beg);
-
-    // Create a string to hold the file contents after N bytes
-    std::string file_data(remaining_size, '\0');
-
-    // Read the file starting from the N-th byte
-    if (!file.read(&file_data[0], remaining_size)) {
-        std::cerr << "Failed to read file: " << feat_file << std::endl;
-        return ;
-    }
-    cuda_err_chk(cudaHostAlloc(&sim_buf, remaining_size, cudaHostAllocDefault));
-  
-    // Copy the file data from the string to the pinned memory
-    std::memcpy(sim_buf, file_data.data(), remaining_size);
-    
-    std::cout << "Simulation Buffer created\n";
+    size_t sim_buff_size = page_size * 1024;
+    cuda_err_chk(cudaHostAlloc(&sim_buf, sim_buff_size, cudaHostAllocDefault));
   }
-*/
+
+  // if(is_simulation){
+  //   std::ifstream file(feat_file, std::ios::binary | std::ios::ate);
+  //   if (!file.is_open()) {
+  //       std::cerr << "Failed to open file: " << feat_file << std::endl;
+  //       return ;
+  //   }
+
+  //   std::cout << "File: " << feat_file << " is opend\n";
+  //   // Get the size of the file
+  //   std::streamsize file_size = file.tellg();
+  //   file.seekg(0, std::ios::beg);
+
+  //   std::streamsize remaining_size = file_size - file_off;
+
+  //   // Move the file pointer to the N-th byte
+  //   file.seekg(file_off, std::ios::beg);
+
+  //   // Create a string to hold the file contents after N bytes
+  //   std::string file_data(remaining_size, '\0');
+
+  //   // Read the file starting from the N-th byte
+  //   if (!file.read(&file_data[0], remaining_size)) {
+  //       std::cerr << "Failed to read file: " << feat_file << std::endl;
+  //       return ;
+  //   }
+  //   cuda_err_chk(cudaHostAlloc(&sim_buf, remaining_size, cudaHostAllocDefault));
+  
+  //   // Copy the file data from the string to the pinned memory
+  //   std::memcpy(sim_buf, file_data.data(), remaining_size);
+    
+  //   std::cout << "Simulation Buffer created\n";
+  // }
+
   
 
   if(use_color_data){
     std::vector<int> color_shape;
-    parse_numpy_file(color_file, 1, color_ptr, color_buffer_ptr, color_shape);
+    parse_numpy_file<int64_t>(color_file, 1, color_ptr, color_buffer_ptr, color_shape);
 
 
-    parse_numpy_file(topk_file, 2, topk_ptr, topk_buffer_ptr, topk_shape);
+    parse_numpy_file<int64_t>(topk_file, 2, topk_ptr, topk_buffer_ptr, topk_shape);
     num_colors = topk_shape[0];
     printf("\t\t use color data num_colors: %i\n", num_colors);
+
+    std::vector<int> score_shape;
+    parse_numpy_file<double>(score_file, 1, score_ptr, score_buffer_ptr, score_shape);
+    printf("\t\t First two scores: %f  %f\n", score_buffer_ptr[0], score_buffer_ptr[1]);
 
   }
 
@@ -244,6 +255,98 @@ void NVSHMEM_Cache<TYPE>::init_cache(Dist_GIDS_Controllers GIDS_ctrl, uint32_t p
 
   return;
 }
+
+
+template <typename TYPE>
+void NVSHMEM_Cache<TYPE>::split_node_list(uint64_t i_index_ptr, int64_t index_size, uint64_t i_output_index_ptr,  uint64_t i_meta_ptr,                         
+                                          uint64_t i_index_counter_list, int64_t num_gpu, uint64_t max_sample_size){
+    int64_t* index_ptr = (int64_t *)i_index_ptr;
+    uint64_t* output_index_ptr = (uint64_t *) i_output_index_ptr;
+    uint64_t* meta_ptr = (uint64_t *) i_meta_ptr;
+
+    uint64_t* index_counter_list = (uint64_t *) i_index_counter_list;
+
+    size_t g_size = (index_size + 1023)/1024;
+
+    split_node_list_kernel<TYPE><<<g_size,1024>>>(index_ptr, output_index_ptr, index_counter_list, num_gpu, index_size, meta_ptr, max_sample_size);
+    cuda_err_chk(cudaDeviceSynchronize());
+
+}
+
+template <typename TYPE>
+void NVSHMEM_Cache<TYPE>::map_feat_data(uint64_t i_return_ptr, const std::vector<uint64_t>& gathered_ten_ptr_list, uint64_t i_map_tensor_ptr, 
+                                        const std::vector<uint64_t>& counter_list, int64_t dim, int64_t num_gpu){
+  
+    TYPE* return_ptr = (TYPE *)i_return_ptr;
+    int64_t* map_tensor_ptr  = (int64_t*) i_map_tensor_ptr;
+
+    cudaStream_t streams[num_gpu];
+    for (int i = 0; i < num_gpu; i++) {
+      cudaStreamCreate(&streams[i]);
+    }
+
+
+    for (int i  = 0; i < num_gpu; i++){
+      TYPE* gathered_ten_ptr =  (TYPE*) (gathered_ten_ptr_list[i]);
+      int64_t cur_count = counter_list[i];
+      map_kernel<TYPE><<<cur_count, 128, 0, streams[i]>>>(return_ptr, gathered_ten_ptr, map_tensor_ptr, cur_count, dim, num_gpu, i);
+
+    }
+    
+    for (int i = 0; i < num_gpu; i++) {
+      cudaStreamSynchronize(streams[i]);
+    }
+
+
+}
+
+
+//NCCL
+template <typename TYPE>
+void NVSHMEM_Cache<TYPE>::read_feature_nccl_backend(const std::vector<uint64_t>& gathered_idx_ptr_list, const std::vector<uint64_t>& gathered_ten_ptr_list,
+                                     const std::vector<uint64_t>& counter_list, int dim, int cache_dim, int64_t num_gpu) {
+  auto t1 = Clock::now();
+  cudaStream_t streams[num_gpu];
+  for (int i = 0; i < num_gpu; i++) {
+    cudaStreamCreate(&streams[i]);
+  }
+
+  for(int i = 0; i < num_gpu; i++){                           
+    TYPE *tensor_ptr = (TYPE *)(gathered_ten_ptr_list[i]);
+    int64_t *index_ptr = (int64_t *)(gathered_idx_ptr_list[i]);
+    uint64_t num_index = counter_list[i];
+
+    uint64_t b_size = 128;
+    uint64_t n_warp = b_size / 32;
+    uint64_t g_size = (num_index+n_warp - 1) / n_warp;
+
+    cuda_err_chk(cudaDeviceSynchronize());
+    auto t1 = Clock::now();
+
+    NVShmem_read_feature_kernel<TYPE><<<g_size, b_size, 0, streams[i]>>>(cache_ptr, tensor_ptr,
+                                                    index_ptr, dim, num_index, cache_dim);
+    total_access += num_index;
+  }
+
+  for (int i = 0; i < num_gpu; i++) {
+    cudaStreamSynchronize(streams[i]);
+  }
+
+  cuda_err_chk(cudaDeviceSynchronize());
+  auto t2 = Clock::now();
+  auto us = std::chrono::duration_cast<std::chrono::microseconds>(
+      t2 - t1); // Microsecond (as int)
+  auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+      t2 - t1); // Microsecond (as int)
+  const float ms_fractional =
+      static_cast<float>(us.count()) / 1000; // Milliseconds (as float)
+
+   kernel_time += ms_fractional;
+   
+
+  return;
+}
+
 
 
 template <typename TYPE>
@@ -264,11 +367,119 @@ void NVSHMEM_Cache<TYPE>::get_cache_data(int64_t ret_i_ptr){
   //   );
 }
 
+
+template <typename TYPE>
+void NVSHMEM_Cache<TYPE>::distribute_node_with_affinity(uint64_t i_item_ptr, uint64_t offset, uint64_t item_len, uint64_t i_parsed_ptr, const std::vector<uint64_t>&  meta_data_list, int batch_size, int num_parts, int domain_id){
+  
+   // printf("start distribute node with cache meta\n");
+    int64_t* item_ptr = (int64_t*) i_item_ptr;
+    item_ptr += offset;
+    int bucket_len[num_parts] =  {0};  
+
+    int64_t* return_ptr = (int64_t*) i_parsed_ptr;
+    
+
+    int topk = topk_shape[1];
+
+
+    int cur_max_part = 0;
+    double max_score = -1.0;
+
+    for(int i = 0; i < item_len; i++){
+      int64_t node_id = item_ptr[i];
+
+      // if(i == 0){
+      //   printf("domain id: %i node_id %lli\n", domain_id, node_id);
+      // }
+
+      int64_t node_color = color_buffer_ptr[node_id];
+      cur_max_part = 0;
+      max_score = -1.0;
+
+      for(int j = 0; j < num_parts; j++){
+        
+        int32_t* meta_ptr = (int32_t*)(meta_data_list[j]);
+        double cur_score = 0;
+        double prev_score = 0;
+        double prev_neigh_score = 0;
+        double prev_affinity = 0;
+
+        if(node_color == 0){
+          cur_score = 0.0;
+        } 
+        else{
+          for(int k = 0; k < topk; k++){
+            int64_t neigh_color = topk_buffer_ptr[(node_color - 1) * topk + k];
+            double neigh_affinity = score_buffer_ptr[(node_color - 1) * topk + k];
+            double neigh_score = 0.0;
+            if(neigh_color != 0){
+              if(meta_ptr[neigh_color] == 0 )
+                continue;
+              neigh_score =  (double) (meta_ptr[neigh_color]);
+
+              // if(neigh_score < 0.0)
+              //   continue;
+
+              prev_score = cur_score;
+
+
+              cur_score += (neigh_score * neigh_affinity );
+            }
+            if(neigh_score < 0.0 || neigh_affinity < 0.0){
+              int32_t neigh_score_int = (meta_ptr[neigh_color]);
+              printf("node color %lli neigh color: %lli score %f prev score:%f prev_affinity:%f prev_neigh_score:%f   neigh_affinity: %f neigh score: %f  idx:%i int score: %lli \n", node_color, neigh_color, cur_score, prev_score, prev_affinity, prev_neigh_score, neigh_affinity, neigh_score, j, neigh_score_int);
+            }
+             
+
+              prev_affinity = neigh_affinity;
+              prev_neigh_score = neigh_score;
+          }
+          // if(cur_max_part == 0)
+          //   printf("part: %i id: %lli  color: %lli bucket_len:%i score: %f\n", j, node_id, node_color, bucket_len[j], cur_score);
+
+        }
+        
+      double before_score = cur_score;
+
+        if(bucket_len[j] == batch_size)
+          cur_score = -1.0;
+
+        // if(domain_id == 0)
+        // printf("part: %i id: %lli  color: %lli bucket_len:%i score: %f before score: %f \n", j, node_id, node_color, bucket_len[j], cur_score, before_score);
+
+        // if(domain_id == 0)
+        //   printf("node id: %lli Part: %i score: %f\n", node_id, j, cur_score);
+        
+        if(cur_score > max_score){
+          cur_max_part = j;
+          max_score = cur_score;
+        }
+      }
+      
+      // if(domain_id == 0)
+      //   printf("node id: %lli write at %i idx: %i\n", node_id, cur_max_part,bucket_len[cur_max_part] );
+
+     if(cur_max_part == domain_id){
+       return_ptr[bucket_len[cur_max_part]] = node_id;
+       // return_ptr[bucket_len[cur_max_part]] = 1;
+     }
+      bucket_len[cur_max_part]+=1;
+    }
+  }
+
+
+
+
+
+
 template <typename TYPE>
 int NVSHMEM_Cache<TYPE>::get_num_colors(){
 
   return num_colors;
 }
+
+
+
 
 ///NVSHMEM
 
@@ -343,8 +554,8 @@ void NVSHMEM_Cache<TYPE>::dist_read_feature(uint64_t i_return_tensor_ptr, uint64
     uint64_t g_size = (h_request_counters[i]+n_warp - 1) / n_warp;
    total_access += h_request_counters[i];
 
-    NVShmem_dist_read_feature_kernel<TYPE><<<g_size, b_size, 0, streams[i]>>>(i, cache_ptr, tensor_ptr,
-                                                  nvshmem_index_ptr + max_index * 2 * i, dim, h_request_counters[i], cache_dim, rank);
+   NVShmem_dist_read_feature_kernel<TYPE><<<g_size, b_size, 0, streams[i]>>>(i, cache_ptr, tensor_ptr,
+                                                 nvshmem_index_ptr + max_index * 2 * i, dim, h_request_counters[i], cache_dim, rank);
   }
 
   for (int i = 0; i < n_gpus; i++) {
@@ -996,8 +1207,12 @@ PYBIND11_MODULE(Dist_Cache, m) {
       .def("get_cache_data", &NVSHMEM_Cache<float>::get_cache_data)
       .def("get_num_colors", &NVSHMEM_Cache<float>::get_num_colors)
 
-        .def("init_with_arg", &NVSHMEM_Cache<float>::init_with_arg)
-
+      .def("init_with_arg", &NVSHMEM_Cache<float>::init_with_arg)
+      .def("distribute_node_with_affinity", &NVSHMEM_Cache<float>::distribute_node_with_affinity)
+     
+      .def("split_node_list", &NVSHMEM_Cache<float>::split_node_list)
+      .def("read_feature_nccl_backend", &NVSHMEM_Cache<float>::read_feature_nccl_backend)
+      .def("map_feat_data", &NVSHMEM_Cache<float>::map_feat_data)
 
       ;
 
