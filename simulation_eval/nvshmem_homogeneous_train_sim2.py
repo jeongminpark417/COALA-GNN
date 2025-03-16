@@ -369,7 +369,7 @@ if __name__ == '__main__':
 
     pid =  int(os.environ.get('SLURM_JOB_ID'))
 
-    os.environ['MASTER_ADDR'] = 'gpua001'
+    os.environ['MASTER_ADDR'] = 'gpua023'
     os.environ['MASTER_PORT'] = str(15385 + (int(pid % 1000)))
     print(f"PID: {pid}")
 
