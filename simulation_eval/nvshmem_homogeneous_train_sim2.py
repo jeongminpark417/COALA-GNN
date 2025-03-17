@@ -1,4 +1,4 @@
-import sklearn.metrics
+#import sklearn.metrics
 import time
 import argparse, datetime
 import torch, torch.nn as nn, torch.optim as optim
@@ -16,7 +16,7 @@ from GIDS import GIDS_NVShmem_Loader, NVSHMEM_GIDS
 
 #from custom_neighbor import sample_neighbors2
 
-from dataloader import IGB260MDGLDataset, OGBDGLDataset, load_ogb, load_ogb_graph, IGB260MDGLDataset_No_Feature
+from dataloader import IGB260MDGLDataset, OGBDGLDataset, load_ogb, load_ogb_graph, IGB260MDGLDataset_No_Feature, OGBDataset_No_Feature
 
 #from custom_sampler import NeighborSampler2
 
@@ -47,12 +47,21 @@ def read_graph_file(filename):
 
     return graph_dict
 
-def track_acc_GIDS( g, args, comm_wrapper, slurm_rank, slurm_world_size, label_array=None):
+def track_acc_GIDS( g, args, comm_wrapper, slurm_rank, slurm_world_size, dim,label_array=None):
 
   
 
     # GIDS_Loader = None
-    in_feats = args.cache_dim
+    in_feats = dim
+
+    color_path = "/projects/bdht/jpark346/igb/medium/color_10K.npy"
+    topk_path = "/projects/bdht/jpark346/igb/medium/topk_10K.npy"
+    score_file = "/projects/bdht/jpark346/igb/medium/score_10K.npy"
+
+    # color_path = "/projects/bdht/jpark346/ogbn_papers100M/color_10K.npy"
+    # topk_path = "/projects/bdht/jpark346/ogbn_papers100M/topk_10K.npy"
+    # score_file = "/projects/bdht/jpark346/ogbn_papers100M/score_10K.npy"
+
 
     GIDS_Loader = NVSHMEM_GIDS(
         page_size = args.page_size,
@@ -66,19 +75,22 @@ def track_acc_GIDS( g, args, comm_wrapper, slurm_rank, slurm_world_size, label_a
         num_ways=32,
         fan_out = [int(fanout) for fanout in args.fan_out.split(',')],
         batch_size = args.batch_size,
-        use_nvshmem_tensor = True,
+       # use_nvshmem_tensor = True,
+        use_nvshmem_tensor = args.nvshmem_cache,
         nvshmem_test = False,
         is_simulation = True,
         feat_file = "/projects/bdht/jpark346/igb/medium/processed/paper/node_feat_memmapped.npy",
         feat_off = 0,
-        use_color_data = True,
-        color_file = "/projects/bdht/jpark346/igb/medium/color_10K.npy",
-        topk_file = "/projects/bdht/jpark346/igb/medium/topk_10K.npy",
-        score_file = "/projects/bdht/jpark346/igb/medium/score_10K.npy",
+        
+        color_file = color_path,
+        topk_file = topk_path,
+        score_file = score_file,
         comm_wrapper=comm_wrapper,
         global_world_size= slurm_world_size,
-        parsing_method = "node_color"
-        #parsing_method = "baseline"
+        use_color_data = True,
+        #parsing_method = "node_color"
+        cache_backend = args.cache_backend,
+        parsing_method = "baseline"
 
     )
 
@@ -87,6 +99,8 @@ def track_acc_GIDS( g, args, comm_wrapper, slurm_rank, slurm_world_size, label_a
     device = 'cuda:' + str(rank)
     mpi_rank = GIDS_Loader.MPI_get_rank()
     mpi_size = GIDS_Loader.MPI_get_world_size()
+
+    print(f"rank: {rank} MPI rank: {mpi_rank} mpi_size {mpi_size} device {device}")
 
     if args.model_type == 'gcn':
         model = GCN(in_feats, args.hidden_channels, args.num_classes, 
@@ -104,6 +118,7 @@ def track_acc_GIDS( g, args, comm_wrapper, slurm_rank, slurm_world_size, label_a
     #model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[device], output_device=device, find_unused_parameters=True)
     model = torch.nn.parallel.DistributedDataParallel(model)
 
+    print(f"Model creatation done rank: {rank} MPI rank: {mpi_rank} mpi_size {mpi_size} device {device}")
 
 
 
@@ -138,7 +153,7 @@ def track_acc_GIDS( g, args, comm_wrapper, slurm_rank, slurm_world_size, label_a
         args.batch_size,
         args.cache_dim,
         GIDS_Loader,
-        shuffle=True,
+        shuffle=False,
         drop_last=False,
         num_workers=args.num_workers,
         use_alternate_streams=False,
@@ -341,8 +356,11 @@ if __name__ == '__main__':
 
     parser.add_argument('--eviction_policy', type=int, default=0)
 
+    parser.add_argument('--nvshmem_cache', action='store_true', help='Use cache if this flag is provided')
 
+    parser.add_argument('--cache_backend', type=str, default="nvshmem")
 
+    print("START")
 
     args = parser.parse_args()
     labels = None
@@ -351,8 +369,8 @@ if __name__ == '__main__':
 
     pid =  int(os.environ.get('SLURM_JOB_ID'))
 
-    # os.environ['MASTER_ADDR'] = 'gpub001'
-    # os.environ['MASTER_PORT'] = str(15385 + (int(pid % 1000)))
+    os.environ['MASTER_ADDR'] = 'gpua023'
+    os.environ['MASTER_PORT'] = str(15385 + (int(pid % 1000)))
     print(f"PID: {pid}")
 
     slurm_rank = int(os.environ.get('SLURM_PROCID'))
@@ -363,118 +381,178 @@ if __name__ == '__main__':
 
     slurm_process_per_node = int(os.environ.get('SLURM_NTASKS_PER_NODE'))
     num_nodes = int(os.environ.get('SLURM_JOB_NUM_NODES'))
-
-    global_world_size = int(slurm_process_per_node * num_nodes)
-
-    device = 'cuda:' + str(slurm_local_rank)
-    in_feats = args.cache_dim
-
-    local_ranks = []
-    local_master = 0
-    for i in range(slurm_process_per_node):
-        local_ranks.append(int(slurm_node_id*slurm_process_per_node + i))
-        if(i == 0):
-            local_master = int(slurm_node_id*slurm_process_per_node + i)
-
-    local_ranks_list = []
-    for i in range(num_nodes):
-        lrank = []
-        for j in range(slurm_process_per_node):
-            lrank.append(int(i*slurm_process_per_node + j))
-
-        local_ranks_list.append(lrank)
-
-    master_ranks = []
-    for i in range(num_nodes):
-        master_ranks.append(int(slurm_process_per_node *i))
-
-
-    #torch.cuda.set_device(slurm_rank % 2)
-    print(f"Test 0MPI rank: {slurm_rank}  MPI Size: {slurm_world_size} device: {device} ")
-    dist.init_process_group("nccl", world_size=slurm_world_size, rank=slurm_rank)
-    torch.cuda.set_device(device)
-    torch.cuda.synchronize(device=device)
-    dist.barrier()
-    print(f"Test 1MPI rank: {slurm_rank}  local ranks {local_ranks} device: {device} ")
-
-    global_gloo = dist.new_group(backend='gloo')
-
-    dist.barrier()
-    dist.barrier(global_gloo)
-
-    local_gloo_list = []
-    local_gather_gloo_list = []
-    for i in range(num_nodes):
-        test_gloo = dist.new_group(ranks=local_ranks_list[i], backend='gloo')
-        dist.barrier(test_gloo)
-        print(f"Test iter: {i} Test 2MPI rank: {slurm_rank}  local ranks {local_ranks} device: {device} ")
-        local_gloo_list.append(test_gloo)
-
-        test_gloo2 = dist.new_group(ranks=local_ranks_list[i], backend='gloo')
-        dist.barrier(test_gloo2)
-        print(f"Test iter2: {i} Test 2MPI rank: {slurm_rank}  local ranks {local_ranks} device: {device} ")
-        local_gather_gloo_list.append(test_gloo2)
-
-
-    local_gloo = local_gloo_list[slurm_node_id]
-    local_gather_gloo = local_gather_gloo_list[slurm_node_id]
-
-    print(f"Test4  rank: {slurm_rank}  master ranks {master_ranks} device: {device} ")
-
-    system_gloo = None
-    is_master = False
-    system_gloo = dist.new_group(ranks=master_ranks, backend='gloo')
-    dist.barrier(system_gloo)
-
-    if(slurm_local_rank == 0):    
-        is_master = True
-    dist.barrier()
     
+    #slurm_process_per_node = 3
+    # # num_nodes = 2
+    # slurm_world_size = 8
 
-    #wrapper
-    comm_tuple=(slurm_rank, local_gloo, local_gather_gloo, slurm_process_per_node, slurm_local_rank, local_master, is_master, system_gloo, num_nodes, slurm_node_id)
-
-
-    in_feats = args.cache_dim
-
-
-    print(f" Rank: {slurm_rank} device: {device}")
-    if(args.data == 'IGB'):
-        print("Dataset: IGB")
-        dataset = IGB260MDGLDataset_No_Feature(args)
-        #dataset = IGB260MDGLDataset(args)
-
-        g = dataset[0]
-        g  = g.formats('csc')
-        g.ndata['labels'] = g.ndata['label']
-    elif(args.data == 'OGB'):
-        print("Dataset: OGB")
-        # dataset = OGBDGLDataset(args)
-        # g = dataset[0]
-        # g  = g.formats('csc')
-
-        #g, labels = load_ogb("ogbn-papers100M", args.path)
-        g, labels = load_ogb_graph("ogbn-papers100M", args.path)
-   # g.ndata['features'] = g.ndata['feat']
-    #g.ndata['labels'] = g.ndata['label']
-
-
-
+    if(slurm_local_rank >= 100):
+        print("not me")
     
-    print(f"Rank: {slurm_rank} Local Rank: {slurm_local_rank} Node ID:{slurm_node_id}")
+    else:
 
-    track_acc_GIDS( g, args, comm_tuple ,slurm_rank, slurm_world_size, labels)
+        # if(slurm_rank == 4):
+        #     slurm_rank = 2
+        #     slurm_local_rank = 0
+        
+        # elif(slurm_rank == 5):
+        #     slurm_rank = 3
+        #     slurm_local_rank = 1
+
+        # elif(slurm_rank == 8):
+        #     slurm_rank = 4
+        #     slurm_local_rank = 0
+
+        # elif(slurm_rank == 9):
+        #     slurm_rank = 5
+        #     slurm_local_rank = 1
+
+        # elif(slurm_rank == 12):
+        #     slurm_rank = 6
+        #     slurm_local_rank = 0
+
+        # elif(slurm_rank == 13):
+        #     slurm_rank = 7
+        #     slurm_local_rank = 1
+
+        
+        
+        slurm_world_size = int(slurm_process_per_node * num_nodes)
+
+        
+        device = 'cuda:' + str(slurm_local_rank)
+        in_feats = args.cache_dim
+
+        local_ranks = []
+        local_master = 0
+        for i in range(slurm_process_per_node):
+            local_ranks.append(int(slurm_node_id*slurm_process_per_node + i))
+            if(i == 0):
+                local_master = int(slurm_node_id*slurm_process_per_node + i)
+
+        local_ranks_list = []
+        for i in range(num_nodes):
+            lrank = []
+            for j in range(slurm_process_per_node):
+                lrank.append(int(i*slurm_process_per_node + j))
+
+            local_ranks_list.append(lrank)
+
+        master_ranks = []
+        for i in range(num_nodes):
+            master_ranks.append(int(slurm_process_per_node *i))
 
 
-    dist.barrier(local_gloo)
-    dist.destroy_process_group(local_gloo)
+        #torch.cuda.set_device(slurm_   rank % 2)
+        print(f"Test 0MPI rank: {slurm_rank}  MPI Size: {slurm_world_size} device: {device} ")
+        dist.init_process_group("nccl", world_size=slurm_world_size, rank=slurm_rank)
+        torch.cuda.set_device(device)
+        torch.cuda.synchronize(device=device)
+        dist.barrier()
+        print(f"Test 1MPI rank: {slurm_rank}  local ranks {local_ranks} device: {device} ")
 
-    if(system_gloo != None):
+        global_gloo = dist.new_group(backend='gloo')
+
+        dist.barrier()
+        dist.barrier(global_gloo)
+
+        local_gloo_list = []
+        local_gather_gloo_list = []
+
+        local_nccl_list = []
+        for i in range(num_nodes):
+            print(f"Test iter: {i} Test 1.5MPI rank: {slurm_rank}  local ranks {local_ranks_list[i]} device: {device} ")
+
+            test_gloo = dist.new_group(ranks=local_ranks_list[i], backend='gloo')
+            dist.barrier(test_gloo)
+            print(f"Test iter: {i} Test 2MPI rank: {slurm_rank}  local ranks {local_ranks} device: {device} ")
+            local_gloo_list.append(test_gloo)
+
+            test_gloo2 = dist.new_group(ranks=local_ranks_list[i], backend='gloo')
+            dist.barrier(test_gloo2)
+            print(f"Test iter2: {i} Test 2MPI rank: {slurm_rank}  local ranks {local_ranks} device: {device} ")
+            local_gather_gloo_list.append(test_gloo2)
+
+            if(args.cache_backend == "nccl"):
+                print(f"Test LOCL NCCL: {i} Test 2MPI rank: {slurm_rank}  local ranks {local_ranks_list[i]} device: {device} ")
+
+                cur_local_nccl = dist.new_group(ranks=local_ranks_list[i], backend='nccl')
+                dist.barrier(cur_local_nccl)
+                local_nccl_list.append(cur_local_nccl)
+
+        local_gloo = local_gloo_list[slurm_node_id]
+        local_gather_gloo = local_gather_gloo_list[slurm_node_id]
+
+        if(args.cache_backend == "nccl"):
+            local_nccl = local_nccl_list[slurm_node_id]
+        else:
+            local_nccl = None
+
+
+        print(f"Test4  rank: {slurm_rank}  master ranks {master_ranks} device: {device} ")
+
+        system_gloo = None
+        is_master = False
+        system_gloo = dist.new_group(ranks=master_ranks, backend='gloo')
         dist.barrier(system_gloo)
-        dist.destroy_process_group(system_gloo)
 
-    dist.barrier()
-    dist.destroy_process_group()
-    # MPI.Finalize()
+        if(slurm_local_rank == 0):    
+            is_master = True
+        dist.barrier()
+        
+
+        #wrapper
+        comm_tuple=(slurm_rank, local_gloo, local_gather_gloo, slurm_process_per_node, slurm_local_rank, local_master, is_master, system_gloo, num_nodes, slurm_node_id, local_nccl)
+
+
+        in_feats = args.cache_dim
+
+
+        print(f" Rank: {slurm_rank} device: {device}")
+        if(args.data == 'IGB'):
+            print("Dataset: IGB")
+            dataset = IGB260MDGLDataset_No_Feature(args)
+            #dataset = IGB260MDGLDataset(args)
+
+            g = dataset[0]
+            g  = g.formats('csc')
+            g.ndata['labels'] = g.ndata['label']
+            dim = 1024
+        elif(args.data == 'OGB'):
+            print("Dataset: OGB")
+            # dataset = OGBDGLDataset(args)
+            # g = dataset[0]
+            # g  = g.formats('csc')
+
+            # g, labels = load_ogb_graph("ogbn-papers100M", args.path)
+
+            dataset = OGBDataset_No_Feature(args)
+            g = dataset.graph
+            g  = g.formats('csc')
+            dim = 128
+            g.ndata['labels'] = g.ndata['label']
+            print(f"Rank {slurm_rank} Dataset: OGB loaded done")
+
+    # g.ndata['features'] = g.ndata['feat']
+        #g.ndata['labels'] = g.ndata['label']
+
+
+
+        
+        print(f"Rank: {slurm_rank} Local Rank: {slurm_local_rank} Node ID:{slurm_node_id}")
+
+        track_acc_GIDS( g, args, comm_tuple ,slurm_rank, slurm_world_size, dim, labels)
+
+
+        dist.barrier(local_gloo)
+        dist.destroy_process_group(local_gloo)
+
+        if(system_gloo != None):
+            dist.barrier(system_gloo)
+            dist.destroy_process_group(system_gloo)
+
+        dist.barrier()
+        dist.destroy_process_group()
+        # MPI.Finalize()
 
 

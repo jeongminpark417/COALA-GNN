@@ -211,7 +211,8 @@ class IGB260MDGLDataset_No_Feature(DGLDataset):
     def process(self):
         dataset = IGB260M(root=self.dir, size=self.args.dataset_size, in_memory=self.args.in_memory, uva_graph=self.args.uva_graph, \
             classes=self.args.num_classes, synthetic=self.args.synthetic, emb_size=self.args.emb_size, data=self.args.data)
-
+        
+        #print("edge: ", dataset.paper_edge)
         #node_features = torch.from_numpy(dataset.paper_feat)
         node_edges = torch.from_numpy(dataset.paper_edge)
         node_labels = torch.from_numpy(dataset.paper_label).to(torch.long)
@@ -241,7 +242,7 @@ class IGB260MDGLDataset_No_Feature(DGLDataset):
             #n_nodes = node_features.shape[0]
             n_train = int(n_labeled_idx * 0.6)
             n_val   = int(n_labeled_idx * 0.2)
-            print("self graph4: ", self.graph.formats())    
+            #print("self graph4: ", self.graph.formats())    
             train_mask = torch.zeros(n_nodes, dtype=torch.bool)
             val_mask = torch.zeros(n_nodes, dtype=torch.bool)
             test_mask = torch.zeros(n_nodes, dtype=torch.bool)
@@ -249,7 +250,7 @@ class IGB260MDGLDataset_No_Feature(DGLDataset):
             train_mask[:n_train] = True
             val_mask[n_train:n_train + n_val] = True
             test_mask[n_train + n_val:n_labeled_idx] = True
-            print("self graph5: ", self.graph.formats())
+            p#rint("self graph5: ", self.graph.formats())
             self.graph.ndata['train_mask'] = train_mask
             self.graph.ndata['val_mask'] = val_mask
             self.graph.ndata['test_mask'] = test_mask
@@ -275,6 +276,61 @@ class IGB260MDGLDataset_No_Feature(DGLDataset):
 
     def __len__(self):
         return len(self.graphs)
+
+
+
+class OGBDataset_No_Feature(DGLDataset):
+    def __init__(self, args):
+        self.dir = args.path
+        self.args = args
+    
+    # def process(self):
+
+        edge_path = osp.join(self.dir, 'ogbn_papers100M', 'raw' ,'edge_index.npy')
+        node_edges = torch.from_numpy(np.load(edge_path))
+
+        label_path = osp.join(self.dir, 'ogbn_papers100M', 'raw', 'node_label.npy')
+        node_labels = np.load(label_path)
+        node_labels_torch =  torch.from_numpy(node_labels).to(torch.long)
+        
+        non_nan_indices = np.where(~np.isnan(node_labels))[0]
+        #print(f"non indices: {non_nan_indices} shape {non_nan_indices.shape} ")
+        non_nan_indices = torch.from_numpy(non_nan_indices)
+        
+       
+        n_nodes = 111059956	
+
+        self.graph = dgl.graph((node_edges[0,:],node_edges[1,:]), num_nodes=n_nodes)
+
+        self.graph.ndata['label'] = node_labels_torch
+
+        total_count = len(non_nan_indices)
+        train_size = int(0.6 * total_count)
+        val_size = int(0.2 * total_count)
+
+        #print(f"Total count: {total_count}")
+
+        train_indices = non_nan_indices[:train_size]
+        val_indices = non_nan_indices[train_size:train_size + val_size]
+        test_indices = non_nan_indices[train_size + val_size:]
+
+        train_mask = torch.zeros(n_nodes, dtype=torch.bool)
+        val_mask = torch.zeros(n_nodes, dtype=torch.bool)
+        test_mask = torch.zeros(n_nodes, dtype=torch.bool)
+
+
+        train_mask[train_indices] = True
+        val_mask[val_indices] = True
+        test_mask[test_indices] = True
+
+
+        
+
+        self.graph.ndata['train_mask'] = train_mask
+        self.graph.ndata['val_mask'] = val_mask
+        self.graph.ndata['test_mask'] = test_mask
+
+     
 
 class SharedIGB260MDGLDataset(DGLDataset):
     def __init__(self, args):

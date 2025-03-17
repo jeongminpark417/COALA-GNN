@@ -16,7 +16,7 @@ from GIDS import GIDS_NVShmem_Loader, NVSHMEM_GIDS
 
 #from custom_neighbor import sample_neighbors2
 
-from dataloader import IGB260MDGLDataset, OGBDGLDataset, load_ogb, load_ogb_graph, IGB260MDGLDataset_No_Feature
+from dataloader import IGB260MDGLDataset, OGBDGLDataset, load_ogb, IGB260MDGLDataset_No_Feature
 
 #from custom_sampler import NeighborSampler2
 
@@ -47,12 +47,46 @@ def read_graph_file(filename):
 
     return graph_dict
 
-def track_acc_GIDS( g, args, comm_wrapper, slurm_rank, slurm_world_size, label_array=None):
+def track_acc_GIDS( g, args, slurm_rank, slurm_world_size, label_array=None):
 
-  
+    # dist.init_process_group("nccl", world_size=slurm_world_size, rank=slurm_rank)
+    # nccl_rank = dist.get_rank()
+
+    # gloo_group = dist.new_group( backend='gloo')
+    # gloo_world_size = dist.get_world_size(group=gloo_group)
+    # gloo_rank = dist.get_rank(group=gloo_group)
+
+    device = 'cuda:' + str(slurm_rank % 2)
+    in_feats = args.cache_dim
+
+    if args.model_type == 'gcn':
+        model = GCN(in_feats, args.hidden_channels, args.num_classes, 
+            args.num_layers).to(device)
+    if args.model_type == 'sage':
+        #model = SAGE(in_feats, args.hidden_channels, args.num_classes, 
+        #    args.num_layers).to(device)
+        model = DistSAGE(in_feats, args.hidden_channels, args.num_classes, args.num_layers, torch.nn.functional.relu
+            ).to(device)
+    if args.model_type == 'gat':
+        model = GAT(in_feats, args.hidden_channels, args.num_classes, 
+            args.num_layers,  args.num_heads).to(device)
+
+
+    td = datetime.timedelta(days=0, hours=0, minutes=1)
+    #torch.cuda.set_device(slurm_rank % 2)
+    print(f"Test 0MPI rank: {slurm_rank}  MPI Size: {slurm_world_size} device: {device} ")
+    dist.init_process_group("nccl", world_size=slurm_world_size, rank=slurm_rank)
+    dist.barrier()
+   # model = torch.nn.parallel.DistributedDataParallel(model)
+    print(f"Test 1MPI rank: {slurm_rank}  MPI Size: {slurm_world_size} device: {device} ")
+    dist.barrier()
+    #print(f"Test 2MPI rank: {slurm_rank}  LIST: {[int(slurm_node_id * 2), int(slurm_node_id*2 + 1)]} device: {device} ")
+    dist.barrier()
+    local_gloo = dist.new_group(ranks=[int(slurm_node_id * 2), int(slurm_node_id*2 + 1)], backend='gloo')
+    dist.barrier()
+    print(f"Test 3MPI rank: {slurm_rank}  MPI Size: {slurm_world_size} device: {device} ")
 
     # GIDS_Loader = None
-    in_feats = args.cache_dim
 
     GIDS_Loader = NVSHMEM_GIDS(
         page_size = args.page_size,
@@ -72,13 +106,8 @@ def track_acc_GIDS( g, args, comm_wrapper, slurm_rank, slurm_world_size, label_a
         feat_file = "/projects/bdht/jpark346/igb/medium/processed/paper/node_feat_memmapped.npy",
         feat_off = 0,
         use_color_data = True,
-        color_file = "/projects/bdht/jpark346/igb/medium/color_10K.npy",
-        topk_file = "/projects/bdht/jpark346/igb/medium/topk_10K.npy",
-        score_file = "/projects/bdht/jpark346/igb/medium/score_10K.npy",
-        comm_wrapper=comm_wrapper,
-        global_world_size= slurm_world_size,
-        parsing_method = "node_color"
-        #parsing_method = "baseline"
+        color_file = "/projects/bdht/jpark346/igb/medium/color.npy",
+        topk_file = "/projects/bdht/jpark346/igb/medium/topk.npy",
 
     )
 
@@ -88,22 +117,17 @@ def track_acc_GIDS( g, args, comm_wrapper, slurm_rank, slurm_world_size, label_a
     mpi_rank = GIDS_Loader.MPI_get_rank()
     mpi_size = GIDS_Loader.MPI_get_world_size()
 
-    if args.model_type == 'gcn':
-        model = GCN(in_feats, args.hidden_channels, args.num_classes, 
-            args.num_layers).to(device)
-    if args.model_type == 'sage':
-        #model = SAGE(in_feats, args.hidden_channels, args.num_classes, 
-        #    args.num_layers).to(device)
-        model = DistSAGE(in_feats, args.hidden_channels, args.num_classes, args.num_layers, torch.nn.functional.relu
-            ).to(device)
-    if args.model_type == 'gat':
-        model = GAT(in_feats, args.hidden_channels, args.num_classes, 
-            args.num_layers,  args.num_heads).to(device)
 
+#    dist.init_process_group("nccl", world_size=slurm_world_size, rank=slurm_rank)
+   # print(f"Test 1MPI rank: {mpi_rank}  MPI Size: {mpi_size} Rank: {rank} device: {device} world size:{size}")
+#     model = torch.nn.parallel.DistributedDataParallel(model)
+#     print(f"Test 2MPI rank: {mpi_rank}  MPI Size: {mpi_size} Rank: {rank} device: {device} world size:{size}")
 
+    
     #model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[device], output_device=device, find_unused_parameters=True)
-    model = torch.nn.parallel.DistributedDataParallel(model)
-
+   # model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[device], output_device=device)
+    #model = torch.nn.parallel.DistributedDataParallel(model)
+    #model = torch.nn.parallel.DistributedDataParallel(model, process_group=GIDS_Loader.comm_protocol.nccl_group)
 
 
 
@@ -114,7 +138,7 @@ def track_acc_GIDS( g, args, comm_wrapper, slurm_rank, slurm_world_size, label_a
     GIDS_Loader.init_cache(device_id=rank, ssd_list=ssd_list)
 
     #g.ndata['features'] = g.ndata['feat']
-   
+    g.ndata['labels'] = g.ndata['label']
 
     train_nid = torch.nonzero(g.ndata['train_mask'], as_tuple=True)[0].clone().detach()
     val_nid = torch.nonzero(g.ndata['val_mask'], as_tuple=True)[0].clone().detach()
@@ -142,7 +166,7 @@ def track_acc_GIDS( g, args, comm_wrapper, slurm_rank, slurm_world_size, label_a
         drop_last=False,
         num_workers=args.num_workers,
         use_alternate_streams=False,
-        reset_time = 10
+        reset_time = 2
         #device=device
         )
 
@@ -172,7 +196,12 @@ def track_acc_GIDS( g, args, comm_wrapper, slurm_rank, slurm_world_size, label_a
 
     print(f"Rank: {rank} train starts")
 
+    # slurm_node_id = int(os.environ.get('SLURM_NODEID'))
 
+    # print(f"Test 2MPI rank: {slurm_rank}  MPI Size: {slurm_world_size} device: {device} ")
+    # dist.barrier()
+    # local_gloo = dist.new_group(ranks=[int(slurm_node_id * 2), int(slurm_node_id*2 + 1)], backend='gloo')
+    # dist.barrier(local_gloo)
 
 
     # Setup is Done
@@ -192,14 +221,14 @@ def track_acc_GIDS( g, args, comm_wrapper, slurm_rank, slurm_world_size, label_a
         num_step = 0
         for step, (input_nodes, seeds, blocks, ret) in enumerate(train_dataloader):
 
-            # if(step == 20):
-            #     break
+            if(step == 10):
+                break
             #print(f"Rank; {rank} step: {step}")
       
             # cpu_ret = ret.to("cpu")
             # print(f"Rank: {rank} step: {step} cpu_ret: {cpu_ret} ret: {ret}")
-            if(step % 100 == 0):
-                print(f"Rank: {rank} step: {step}")
+            # if(step % 100 == 0):
+            #     print("step: ", step)
             # if(rank == 1):
             #     print("input_nodes: ", input_nodes)
             #     ret_cpu = ret.to("cpu")
@@ -235,7 +264,7 @@ def track_acc_GIDS( g, args, comm_wrapper, slurm_rank, slurm_world_size, label_a
             batch_labels = batch_labels.to(device)
             transfer_time = transfer_time +  time.time()  - transfer_start
 
-            #print(f"Device: {device} input: {batch_inputs}")
+            print(f"Device: {device} input: {batch_inputs}")
             train_start = time.time()
             batch_pred = model(blocks, batch_inputs)
             loss = loss_fcn(batch_pred, batch_labels)
@@ -248,7 +277,7 @@ def track_acc_GIDS( g, args, comm_wrapper, slurm_rank, slurm_world_size, label_a
             num_step += 1
 
         
-        print(f"Performance for epoch: %{epoch} iterations: {num_step}")
+        print(f"Performance for epoch: %{epoch}")
         e2e_time += time.time() - e2e_time_start 
         train_dataloader.print_stats()
         train_dataloader.print_timer()
@@ -267,7 +296,7 @@ def track_acc_GIDS( g, args, comm_wrapper, slurm_rank, slurm_world_size, label_a
     model.eval()
     predictions = []
     labels = []
-    #g.ndata['labels'] = g.ndata['label']
+
     # c = 0
     # with torch.no_grad():
     #     #for _, _, blocks in test_dataloader:
@@ -349,96 +378,10 @@ if __name__ == '__main__':
     device = 'cuda:' + str(args.device)
 
 
-    pid =  int(os.environ.get('SLURM_JOB_ID'))
-
-    # os.environ['MASTER_ADDR'] = 'gpub001'
-    # os.environ['MASTER_PORT'] = str(15385 + (int(pid % 1000)))
-    print(f"PID: {pid}")
-
-    slurm_rank = int(os.environ.get('SLURM_PROCID'))
-    slurm_world_size = int(os.environ.get('SLURM_NTASKS'))
-
-    slurm_local_rank = int(os.environ.get('SLURM_LOCALID'))
-    slurm_node_id = int(os.environ.get('SLURM_NODEID'))
-
-    slurm_process_per_node = int(os.environ.get('SLURM_NTASKS_PER_NODE'))
-    num_nodes = int(os.environ.get('SLURM_JOB_NUM_NODES'))
-
-    global_world_size = int(slurm_process_per_node * num_nodes)
-
-    device = 'cuda:' + str(slurm_local_rank)
-    in_feats = args.cache_dim
-
-    local_ranks = []
-    local_master = 0
-    for i in range(slurm_process_per_node):
-        local_ranks.append(int(slurm_node_id*slurm_process_per_node + i))
-        if(i == 0):
-            local_master = int(slurm_node_id*slurm_process_per_node + i)
-
-    local_ranks_list = []
-    for i in range(num_nodes):
-        lrank = []
-        for j in range(slurm_process_per_node):
-            lrank.append(int(i*slurm_process_per_node + j))
-
-        local_ranks_list.append(lrank)
-
-    master_ranks = []
-    for i in range(num_nodes):
-        master_ranks.append(int(slurm_process_per_node *i))
-
-
-    #torch.cuda.set_device(slurm_rank % 2)
-    print(f"Test 0MPI rank: {slurm_rank}  MPI Size: {slurm_world_size} device: {device} ")
-    dist.init_process_group("nccl", world_size=slurm_world_size, rank=slurm_rank)
-    torch.cuda.set_device(device)
-    torch.cuda.synchronize(device=device)
-    dist.barrier()
-    print(f"Test 1MPI rank: {slurm_rank}  local ranks {local_ranks} device: {device} ")
-
-    global_gloo = dist.new_group(backend='gloo')
-
-    dist.barrier()
-    dist.barrier(global_gloo)
-
-    local_gloo_list = []
-    local_gather_gloo_list = []
-    for i in range(num_nodes):
-        test_gloo = dist.new_group(ranks=local_ranks_list[i], backend='gloo')
-        dist.barrier(test_gloo)
-        print(f"Test iter: {i} Test 2MPI rank: {slurm_rank}  local ranks {local_ranks} device: {device} ")
-        local_gloo_list.append(test_gloo)
-
-        test_gloo2 = dist.new_group(ranks=local_ranks_list[i], backend='gloo')
-        dist.barrier(test_gloo2)
-        print(f"Test iter2: {i} Test 2MPI rank: {slurm_rank}  local ranks {local_ranks} device: {device} ")
-        local_gather_gloo_list.append(test_gloo2)
-
-
-    local_gloo = local_gloo_list[slurm_node_id]
-    local_gather_gloo = local_gather_gloo_list[slurm_node_id]
-
-    print(f"Test4  rank: {slurm_rank}  master ranks {master_ranks} device: {device} ")
-
-    system_gloo = None
-    is_master = False
-    system_gloo = dist.new_group(ranks=master_ranks, backend='gloo')
-    dist.barrier(system_gloo)
-
-    if(slurm_local_rank == 0):    
-        is_master = True
-    dist.barrier()
-    
-
-    #wrapper
-    comm_tuple=(slurm_rank, local_gloo, local_gather_gloo, slurm_process_per_node, slurm_local_rank, local_master, is_master, system_gloo, num_nodes, slurm_node_id)
-
-
     in_feats = args.cache_dim
 
 
-    print(f" Rank: {slurm_rank} device: {device}")
+    print("device: ", device)
     if(args.data == 'IGB'):
         print("Dataset: IGB")
         dataset = IGB260MDGLDataset_No_Feature(args)
@@ -446,35 +389,30 @@ if __name__ == '__main__':
 
         g = dataset[0]
         g  = g.formats('csc')
-        g.ndata['labels'] = g.ndata['label']
     elif(args.data == 'OGB'):
         print("Dataset: OGB")
         # dataset = OGBDGLDataset(args)
         # g = dataset[0]
         # g  = g.formats('csc')
 
-        #g, labels = load_ogb("ogbn-papers100M", args.path)
-        g, labels = load_ogb_graph("ogbn-papers100M", args.path)
+        g, labels = load_ogb("ogbn-papers100M", args.path)
    # g.ndata['features'] = g.ndata['feat']
-    #g.ndata['labels'] = g.ndata['label']
+    g.ndata['labels'] = g.ndata['label']
 
+    os.environ['MASTER_ADDR'] = 'gpub031'
+    os.environ['MASTER_PORT'] = '15879'
 
+    slurm_rank = int(os.environ.get('SLURM_PROCID'))
+    slurm_world_size = int(os.environ.get('SLURM_NTASKS'))
+
+    slurm_local_rank = int(os.environ.get('SLURM_LOCALID'))
+    slurm_node_id = int(os.environ.get('SLURM_NODEID'))
 
     
     print(f"Rank: {slurm_rank} Local Rank: {slurm_local_rank} Node ID:{slurm_node_id}")
 
-    track_acc_GIDS( g, args, comm_tuple ,slurm_rank, slurm_world_size, labels)
+    track_acc_GIDS( g, args, slurm_rank, slurm_world_size, labels)
 
-
-    dist.barrier(local_gloo)
-    dist.destroy_process_group(local_gloo)
-
-    if(system_gloo != None):
-        dist.barrier(system_gloo)
-        dist.destroy_process_group(system_gloo)
-
-    dist.barrier()
-    dist.destroy_process_group()
     # MPI.Finalize()
 
 
