@@ -47,7 +47,12 @@ def read_graph_file(filename):
     return graph_dict
 
 
-def train( g, args, device, Comm_Manager):
+def train( g, args, device, Comm_Manager, feat_shared_uva = None):
+    if(feat_shared_uva != None):
+        print("SSD_GNN simulation train")
+    else:
+        print("SSD_GNN real SSD train")
+
     meta_path = args.path + str(args.dataset_size) + "/"
     color_file = meta_path + "color.npy"
     topk_file = meta_path + "topk.npy"
@@ -56,7 +61,8 @@ def train( g, args, device, Comm_Manager):
 
 
     train_nid = torch.nonzero(g.ndata['train_mask'], as_tuple=True)[0].clone().detach()
-    print(f"train nid: {train_nid}")
+    test_nid = torch.nonzero(g.ndata['test_mask'], as_tuple=True)[0].clone().detach()
+
     Node_Distributor_Manager = Node_Distributor(Comm_Manager, train_nid, args.batch_size, color_file, topk_file, score_file)
 
     sampler = dgl.dataloading.MultiLayerNeighborSampler(
@@ -82,51 +88,96 @@ def train( g, args, device, Comm_Manager):
                         cache_size,
                         device,
                         cache_backend = "nvshmem",
-                        is_simulation = True,
+                        sim_buf = feat_shared_uva,
                         shuffle = False)
+
+
 
     print("train dataloader init done")
 
-    idx_list = [0,1]
-    batch = sampler.sample(g, idx_list)
-    print("done\n")
-    # print(f"batch: {batch}")
-    # for block in batch[2]:  # batch[2] contains the list of Blocks
-    #     src_nodes, dst_nodes = block.edges()
-    #     print(f"Edges in block: {list(zip(src_nodes.tolist(), dst_nodes.tolist()))}")
+    if args.model_type == 'gcn':
+        model = GCN(in_feats, args.hidden_channels, args.num_classes, 
+            args.num_layers).to(device)
+    if args.model_type == 'sage':
+        #model = SAGE(in_feats, args.hidden_channels, args.num_classes, 
+        #    args.num_layers).to(device)
+        model = DistSAGE(in_feats, args.hidden_channels, args.num_classes, args.num_layers, torch.nn.functional.relu
+            ).to(device)
+    if args.model_type == 'gat':
+        model = GAT(in_feats, args.hidden_channels, args.num_classes, 
+            args.num_layers,  args.num_heads).to(device)
+
+
+
+    loss_fcn = nn.CrossEntropyLoss().to(device)
+    optimizer = optim.Adam(
+        model.parameters(), 
+        lr=args.learning_rate, weight_decay=args.decay
+        )
+
+
+    #for step, (blocks) in enumerate(train_loader):
+    count = 0
+    print("Training start")
+    model.train()
+    for step, (input_nodes, seeds, blocks, fetch_feature) in enumerate(train_loader):
+        if(step % 1 == 0):
+            print(f"step: {step}")
+        if(count == 100):
+            break
+#        print(f"step: {step} blocks: {input_nodes} fetch_feature: {fetch_feature}")
+        count += 1
+        
+        batch_labels = blocks[-1].dstdata['labels']
+        blocks = [block.int().to(device) for block in blocks]
+        batch_labels = batch_labels.to(device)
+        batch_pred = model(blocks, fetch_feature)
+        loss = loss_fcn(batch_pred, batch_labels)
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+    print(f"Total number of iterations: {count}")
+    Test_Node_Distributor_Manager = Node_Distributor(Comm_Manager, test_nid, args.batch_size, color_file, topk_file, score_file)
+    test_loader = SSD_GNN_DataLoader(
+                    SSD_manager,
+                    Test_Node_Distributor_Manager, 
+                    g,
+                    sampler,
+                    args.batch_size, 
+                    dim,
+                    fan_out,
+                    cache_size,
+                    device,
+                    cache_backend = "nvshmem",
+                    sim_buf = feat_shared_uva,
+                    shuffle = False)
+
+    model.eval()
+    predictions = []
+    labels = []
+    g.ndata['labels'] = g.ndata['label']
+    count = 0
+    with torch.no_grad():
+        #for _, _, blocks in test_dataloader:
+        for step, (input_nodes, seeds, blocks, fetch_feature) in enumerate(test_loader):
+            if(count % 100 == 0):
+                print("Eval step: ", count)
+            if(count == 100):
+                break
+            blocks = [block.to(device) for block in blocks]
+            batch_labels = blocks[-1].dstdata['labels']
+            
+            labels.append(blocks[-1].dstdata['label'].cpu().numpy())
+            predictions.append(model(blocks, fetch_feature).argmax(1).cpu().numpy())
+            count += 1
+        predictions = np.concatenate(predictions)
+        labels = np.concatenate(labels)
+        test_acc = sklearn.metrics.accuracy_score(labels, predictions)*100
+    print("Test Acc {:.2f}%".format(test_acc))
+
+
             
 
-# def train( g, args, comm_wrapper, slurm_rank, slurm_world_size, dim,label_array=None):
-#    GIDS_Loader = NVSHMEM_GIDS(
-#         page_size = args.page_size,
-#         off = args.offset,
-#         num_ele = args.num_ele,
-#         num_ssd = args.num_ssd,
-#         GPU_cache_size = args.GPU_cache_size,
-#         CPU_cache_size = args.CPU_cache_size,
-#         cache_dim = args.cache_dim,
-#         dim = args.cache_dim,
-#         num_ways=32,
-#         fan_out = [int(fanout) for fanout in args.fan_out.split(',')],
-#         batch_size = args.batch_size,
-#        # use_nvshmem_tensor = True,
-#         use_nvshmem_tensor = args.nvshmem_cache,
-#         nvshmem_test = False,
-#         is_simulation = True,
-#         feat_file = "/projects/bdht/jpark346/igb/medium/processed/paper/node_feat_memmapped.npy",
-#         feat_off = 0,
-        
-#         color_file = color_path,
-#         topk_file = topk_path,
-#         score_file = score_file,
-#         comm_wrapper=comm_wrapper,
-#         global_world_size= slurm_world_size,
-#         use_color_data = True,
-#         #parsing_method = "node_color"
-#         cache_backend = args.cache_backend,
-#         parsing_method = "baseline"
-
-#     )
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
@@ -177,6 +228,8 @@ if __name__ == '__main__':
 
     parser.add_argument('--eviction_policy', type=int, default=0)
 
+    parser.add_argument('--feat_cpu', action='store_true', help='Store features on CPU')
+
 
 
 
@@ -223,8 +276,10 @@ if __name__ == '__main__':
     os.environ['MASTER_ADDR'] = 'localhost'
     os.environ['MASTER_PORT'] = '12345'
 
-
-    train( g, args, device, Comm_Manager)
+    feat_data = None
+    if(args.feat_cpu):
+        feat_data = dataset.feat_data
+    train( g, args, device, Comm_Manager, feat_data)
 
 
     if (Comm_Manager.local_rank == 0):

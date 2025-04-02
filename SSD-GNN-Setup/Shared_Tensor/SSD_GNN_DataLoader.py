@@ -112,12 +112,16 @@ class SSD_GNN_DataLoader(torch.utils.data.DataLoader):
                  cache_size, # In MB
                  device,
                  cache_backend = "nvshmem",
-                 is_simulation = True,
+                 sim_buf = None,
                  shuffle=False,
                  ):
 
         self.sampler = graph_sampler
         self.batch_size = batch_size
+        self.g = graph
+        self.SSD_info = SSD_info
+        self.cache_backend = cache_backend
+        self.node_distributor = node_distributor
 
         self.SSD_GNN_Manager = SSD_GNN_Manager(
                                     num_ssds = SSD_info.num_ssds,
@@ -130,18 +134,28 @@ class SSD_GNN_DataLoader(torch.utils.data.DataLoader):
                                     MPI_comm_manager = node_distributor.comm_manager,
                                     device = device,
                                     cache_backend = cache_backend,
-                                    is_simulation=is_simulation
+                                    sim_buf=sim_buf
         )
-        print("SSD GNN Manager init done")
 
-
+        self.counter = 0
+        self.index_len = len(self.node_distributor.index_tensor)
+        print(f"Index len: {self.index_len}")
+        
     def __iter__(self):
         return self
+
+    # Return Tuple
+    # (Input Nodes, seeds, blocks, feature data)
+    def __next__(self):
+        if (self.counter >= self.index_len):
+            raise StopIteration  # This tells Python to stop iteration
+        index = self.node_distributor.index_tensor[self.counter:(self.counter+self.batch_size)]
+        batch = self.sampler.sample(self.g, index)
+
+        self.counter += self.batch_size
+
+        return self.SSD_GNN_Manager.fetch_feature(batch)
     
     def __del__(self):
         del self.SSD_GNN_Manager
-
-    #def __next__(self):
         
-
-       

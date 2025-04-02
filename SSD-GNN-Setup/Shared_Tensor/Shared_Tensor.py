@@ -5,6 +5,20 @@ from mpi4py import MPI
 import ctypes
 import torch
 import torch.distributed as dist
+import numpy as np
+from torch.utils.data import DataLoader, Dataset
+
+import time
+
+class NumpyDataset(Dataset):
+    def __init__(self, np_array):
+        self.data = np_array
+
+    def __len__(self):
+        return len(self.data)
+
+    def __getitem__(self, idx):
+        return self.data[idx]
 
 
 class MPI_Comm_Manager(object):
@@ -89,8 +103,30 @@ class Shared_UVA_Tensor_Manager(object):
         if(self.comm_manager.local_rank == 0):
             if uva_tensor.shape != np_array.shape:
                 raise ValueError(f"Tensor shape {uva_tensor.shape} does not match numpy array shape {np_array.shape}")
+            load_start = time.time()
             uva_tensor.copy_(torch.from_numpy(np_array))
+            loading_time = (time.time() - load_start)
+            print(f"Data loading time: {loading_time}")
         self.comm_manager.local_comm.Barrier()
+
+    def write_np_array_gpu(self, uva_tensor, np_array, device):
+        if(self.comm_manager.local_rank == 0):
+            if uva_tensor.shape != np_array.shape:
+                raise ValueError(f"Tensor shape {uva_tensor.shape} does not match numpy array shape {np_array.shape}")
+            load_start = time.time()
+            
+            dataset = NumpyDataset(np_array)
+            dataloader = DataLoader(dataset, batch_size=int(1024*1024*1024), shuffle=False, drop_last=False)
+            offset = 0
+            for idx, batch in enumerate(dataloader):
+                uva_tensor[offset: offset+ batch.size(0)] = batch.to('cuda')
+                offset += batch.size(0)
+
+            loading_time = (time.time() - load_start)
+            print(f"Data loading time: {loading_time} Num copied elements: {offset}")
+        self.comm_manager.local_comm.Barrier()
+
+
 
 
 

@@ -6,6 +6,7 @@ import torch
 class NVShmem_Tensor_Manager(object):
     def __init__(self, nvshmem_batch_ptr: int, batch_nbytes: int, nvshmem_index_ptr: int, 
                 index_nbytes: int, shape: tuple, device: str):
+        print(f"NVSHMEM batch: {batch_nbytes} index: {index_nbytes}")
         self.nvshmem_batch_ptr = nvshmem_batch_ptr
         self.batch_nbytes = batch_nbytes
         self.batch_mem = cp.cuda.UnownedMemory(nvshmem_batch_ptr, batch_nbytes, owner=None)
@@ -53,15 +54,21 @@ class SSD_GNN_Manager(object):
         device,
         cache_backend = "nvshmem",
 
-        is_simulation = False,
+        sim_buf = None
         ):
         self.device = device
         self.cache_backend = cache_backend
-        self.is_simulation = is_simulation
         self.MPI_comm_manager = MPI_comm_manager
+        self.dim = dim
+        self.sim_buf = sim_buf
+        if(sim_buf == None):
+            self.is_simulation = False
+        else:
+            self.is_simulation = True
+
 
         device_id = MPI_comm_manager.local_rank
-        self.SSD_Controllers = SSD_GNN_SSD_Controllers(num_ssds, num_elems, ssd_read_offset, device_id, dim, is_simulation)
+        self.SSD_Controllers = SSD_GNN_SSD_Controllers(num_ssds, num_elems, ssd_read_offset, device_id, dim, self.is_simulation)
 
         self.max_sample_size = batch_size
         for i in fan_out:
@@ -71,27 +78,49 @@ class SSD_GNN_Manager(object):
             local_comm_ptr = MPI._addressof(self.MPI_comm_manager.local_comm)
             self.nvshmem_manager = NVSHMEM_Manager(local_comm_ptr, self.MPI_comm_manager.local_rank)
 
-            # nbytes = int(self.max_sample_size * 4 * dim)
-            # nvshmem_ptr = self.nvshmem_manager.allocate(nbytes) 
-            # print("NVSHMEM Manager allocate 1 done")
+            nbytes = int(self.max_sample_size * 4 * dim)
+            nvshmem_ptr = self.nvshmem_manager.allocate(nbytes) 
 
-            # index_nbytes = int(self.max_sample_size  * 8 * 2)
-            # nvshmem_index_ptr = self.nvshmem_manager.allocate(nbytes) 
-            # index_shape = [self.MPI_comm_manager.local_size, int(self.max_sample_size * 2)]
-            # print("NVSHMEM Manager allocate 2 done")
+            index_nbytes = int(self.max_sample_size  * 8 * 2)
+            nvshmem_index_ptr = self.nvshmem_manager.allocate(nbytes) 
+            index_shape = [self.MPI_comm_manager.local_size, int(self.max_sample_size * 2)]
 
-            # self.NVshmem_tensor_manager = NVShmem_Tensor_Manager(nvshmem_ptr, nbytes, nvshmem_index_ptr, index_nbytes, index_shape, self.device)
-            # print("NVSHMEM Tensor mangaer done")
-
-            # #Initializing SSD_GNN Cache
-            # self.SSD_GNN_Cache = SSD_GNN_NVSHMEM_Cache(self.SSD_Controllers,  self.MPI_comm_manager.local_size, cache_size)
-            # print("NVSHMEM Cache mangaer done")
+            self.NVshmem_tensor_manager = NVShmem_Tensor_Manager(nvshmem_ptr, nbytes, nvshmem_index_ptr, index_nbytes, index_shape, self.device)
+            # Initializing SSD_GNN Cache
+            if(self.is_simulation):
+                self.SSD_GNN_Cache = SSD_GNN_NVSHMEM_Cache(self.SSD_Controllers,  self.MPI_comm_manager.local_size, cache_size, self.sim_buf.data_ptr())
+            else:
+                self.SSD_GNN_Cache = SSD_GNN_NVSHMEM_Cache(self.SSD_Controllers,  self.MPI_comm_manager.local_size, cache_size, 0)
+            print("NVSHMEM Cache mangaer done")
 
         elif (self.cache_backend == "nccl"):
             print(f"Unsupported cache backend: {self.cache_backend}")
         else:
             print(f"Unsupported cache backend: {self.cache_backend}")
             return
+
+
+    def fetch_feature(self, batch):
+        index = batch[0].to(self.device)
+        index_size = len(index)
+        index_ptr = index.data_ptr()
+
+        if(self.cache_backend == "nvshmem"):
+            return_torch_shape = [index_size, self.dim]
+            #print(f"return torch shape: {return_torch_shape}")
+            return_torch = self.NVshmem_tensor_manager.get_batch_tensor(return_torch_shape)
+            return_torch_ptr = self.NVshmem_tensor_manager.get_batch_tensor_ptr()
+            request_tensor_ptr = self.NVshmem_tensor_manager.get_index_tensor_ptr()
+
+            self.SSD_GNN_Cache.send_requests(index_ptr, index_size, request_tensor_ptr, self.max_sample_size)
+            self.SSD_GNN_Cache.read_feature(return_torch_ptr, request_tensor_ptr, self.max_sample_size)
+
+            return (*batch, return_torch)
+        else:
+            print("Unsupported cache backend for fetch_feature")
+            return
+
+
         
     # def __del__(self):
     #     if(self.cache_backend == "nvshmem"):

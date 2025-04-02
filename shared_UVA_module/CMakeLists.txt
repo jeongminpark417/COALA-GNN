@@ -21,21 +21,18 @@ include_directories(${MPI_INCLUDE_PATH})  # Ensure MPI headers are found
 # message(STATUS "MPI Libraries: ${MPI_LIBRARIES}")
 # message(STATUS "MPI Executable: ${MPIEXEC_EXECUTABLE}")
 
-find_package(MPI4Py)
-if(MPI4Py_FOUND)
-  include_directories(${MPI4Py_INCLUDE_DIRS})
-  target_link_libraries(SSD_GNN_Pybind ${MPI4Py_LIBRARIES})
-endif()
+message(STATUS "MPI4Py Include Path: ${MPI4Py_INCLUDE_DIR}")
 
 #$set(NVSHMEM_HOME "/usr/lib/x86_64-linux-gnu/")
-set(NVSHMEM_HOME "/usr/local/nvshmem")
+#set(NVSHMEM_HOME "/usr/local/nvshmem")
+set(NVSHMEM_HOME "/u/jpark346/nvshmem")
 
 set(NVSHMEM_HOST_LIB "${NVSHMEM_HOME}/lib/libnvshmem_host.so")
 set(NVSHMEM_DEVICE_LIB "${NVSHMEM_HOME}/lib/libnvshmem_device.a")
 
 
-include_directories(${MPI_INCLUDE_PATH} ../bam/include ../bam/include/freestanding/include/ ${NVSHMEM_HOME}/include /home/jpark346/miniconda3/lib/python3.9/site-packages/mpi4py/include)
-link_libraries(  ${CMAKE_CURRENT_SOURCE_DIR}/../bam/build/lib/libnvm.so pybind11::module MPI::MPI_CXX cuda  ${NVSHMEM_HOME}/lib /usr/lib/x86_64-linux-gnu/openmpi/lib/libmpi.so)
+include_directories(${MPI_INCLUDE_PATH} ../bam/include ../bam/include/freestanding/include/ ${NVSHMEM_HOME}/include ${MPI4Py_INCLUDE_DIR})
+link_libraries(  ${CMAKE_CURRENT_SOURCE_DIR}/../bam/build/lib/libnvm.so pybind11::module MPI::MPI_CXX cuda  ${NVSHMEM_HOME}/lib ${MPI_HOME}/lib)
 
 # include_directories(${MPI_INCLUDE_PATH} ../bam/include ../bam/include/freestanding/include/ /home/jpark346/miniconda3/lib/python3.9/site-packages/mpi4py/include)
 # #link_libraries(  ${CMAKE_CURRENT_SOURCE_DIR}/../bam/build/lib/libnvm.so pybind11::module MPI::MPI_CXX cuda  /usr/lib/x86_64-linux-gnu/openmpi/lib/libmpi.so)

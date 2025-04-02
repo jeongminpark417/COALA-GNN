@@ -10,6 +10,9 @@ warnings.filterwarnings("ignore")
 
 from Shared_Tensor import MPI_Comm_Manager, Shared_UVA_Tensor_Manager
 import cupy as cp
+from mpi4py import MPI
+import gc
+
 
 
 class IGB260M(object):
@@ -211,34 +214,114 @@ class IGB260MDGLDataset(DGLDataset):
 class IGBDatast_Shared_UVA(DGLDataset):
     def __init__(self, args, comm_manager, device):
         self.dir = args.path
+        self.size = args.dataset_size
+        self.num_classes = args.num_classes
         self.args = args
         self.comm_manager = comm_manager
         self.device = device
+        self.feat_data = None
+        self.local_rank = comm_manager.local_rank
         super().__init__(name='IGB260M')
 
+    def num_nodes(self):
+        if self.size == 'tiny':
+            return 100000
+        elif self.size == 'small':
+            return 1000000
+        elif self.size == 'medium':
+            return 10000000
+        elif self.size == 'large':
+            return 100000000
+        elif self.size == 'full':
+            return 269346174
+
+    def get_label(self) -> np.ndarray:
+        if self.size == 'large' or self.size == 'full':
+            num_nodes = self.num_nodes()
+            if self.num_classes == 19:
+            #    path = '/mnt/nvme16/IGB260M_part_2/full/processed/paper/node_label_19_extended.npy'
+                path = osp.join(self.dir, self.size, 'processed', 'paper', 'node_label_19.npy')
+                node_labels = np.memmap(path, dtype='float32', mode='r',  shape=(num_nodes))
+                # Actual number 227130858
+            else:
+                #path = '/mnt/nvme16/IGB260M_part_2/full/processed/paper/node_label_2K_extended.npy'
+                path = osp.join(self.dir, self.size, 'processed', 'paper', 'node_label_2K.npy')
+                node_labels = np.load(path)
+     
+        else:
+            if self.num_classes == 19:
+                path = osp.join(self.dir, self.size, 'processed', 'paper', 'node_label_19.npy')
+            else:
+                path = osp.join(self.dir, self.size, 'processed', 'paper', 'node_label_2K.npy')
+            node_labels = np.load(path)
+        return node_labels
+
     def process(self):
-        dataset = IGB260M(root=self.dir, size=self.args.dataset_size, in_memory=self.args.in_memory, uva_graph=self.args.uva_graph, \
-            classes=self.args.num_classes, synthetic=self.args.synthetic, emb_size=self.args.emb_size, data=self.args.data)
-        
+        if(self.args.feat_cpu):
 
-        print(f"edge type: {dataset.paper_edge.dtype} Bytes: {dataset.paper_edge.nbytes}, Shape: {dataset.paper_edge.shape}")
-        self.shared_UVA_manager = Shared_UVA_Tensor_Manager(self.comm_manager, "/shared_mem", dataset.paper_edge.nbytes)
-        node_edges = self.shared_UVA_manager.get_tensor(dtype=cp.int64, tensor_shape=dataset.paper_edge.shape)
+            feat_array_size = np.empty([1], dtype="int")
+            feat_shape_list = np.empty([2], dtype="int")
+            emb = None
+            if(self.local_rank == 0):
+                print("Loading feature data into CPU for SSD simulation")
+                feat_path = osp.join(self.dir, self.size, 'processed', 'paper', 'node_feat.npy')
+                emb = np.load(feat_path)
+                feat_array_size[0] = emb.nbytes
+                feat_shape_list = np.array(emb.shape)
+
+            #Sharing feat information
+            self.comm_manager.local_comm.Barrier()
+            self.comm_manager.local_comm.Bcast(feat_array_size, root = 0)
+
+            self.comm_manager.local_comm.Barrier()
+            self.comm_manager.local_comm.Bcast(feat_shape_list, root = 0)
+            feat_shape = torch.Size(feat_shape_list)
+
+
+            self.shared_UVA_manager_feat = Shared_UVA_Tensor_Manager(self.comm_manager, "/shared_mem_feat", feat_array_size[0])
+            self.feat_data = self.shared_UVA_manager_feat.get_tensor(dtype=cp.float32, tensor_shape=feat_shape)
+            self.shared_UVA_manager_feat.write_np_array(self.feat_data, emb)
+            #self.shared_UVA_manager_feat.write_np_array_gpu(self.feat_data, emb, self.device)
+
+            del emb
+
+        edge_array_size = np.empty([1], dtype="int")
+        edge_shape_list = np.empty([2], dtype="int")
+        edge_array = None
+        if(self.local_rank == 0):
+            edge_path = osp.join(self.dir, self.size, 'processed', 'paper__cites__paper', 'edge_index.npy')
+            edge_array = np.load(edge_path)
+            print(f"edge type: {edge_array.dtype} Bytes: {edge_array.nbytes}, Shape: {edge_array.shape}")
+            edge_array_size[0] = edge_array.nbytes
+            edge_shape_list = np.array(edge_array.shape)
+
+        #Sharing edge information
+        self.comm_manager.local_comm.Barrier()
+        self.comm_manager.local_comm.Bcast(edge_array_size, root = 0)
+
+        self.comm_manager.local_comm.Barrier()
+        self.comm_manager.local_comm.Bcast(edge_shape_list, root = 0)
+        edge_shape = torch.Size(edge_shape_list)
+
+
+        self.shared_UVA_manager = Shared_UVA_Tensor_Manager(self.comm_manager, "/shared_mem", edge_array_size[0])
+        node_edges = self.shared_UVA_manager.get_tensor(dtype=cp.int64, tensor_shape=edge_shape)
         print(f"node edges shape: {node_edges.shape} device: {node_edges.device} array: {node_edges}" )
-        self.shared_UVA_manager.write_np_array(node_edges, dataset.paper_edge)
+        self.shared_UVA_manager.write_np_array(node_edges, edge_array)
         print(f"After COPY node edges shape: {node_edges.shape} device: {node_edges.device} array: {node_edges}" )
+        del edge_array
 
-        node_labels = torch.from_numpy(dataset.paper_label).to(torch.long).to(self.device)
+        gc.collect()
+        print("Freed local graph data")
 
-      
-        n_nodes = dataset.num_nodes()
+        node_labels = torch.from_numpy(self.get_label()).to(torch.long).to(self.device)
+
+        n_nodes = self.num_nodes()
         print("Number of Nodes: ", n_nodes)
         self.graph = dgl.graph((node_edges[:, 0],node_edges[:, 1]), num_nodes=n_nodes)
       
-        
-
+    
         self.graph.ndata['label'] = node_labels
-        print("self graph3: ", self.graph.formats())
 
 
         if self.args.dataset_size == 'full':

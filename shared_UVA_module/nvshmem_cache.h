@@ -22,6 +22,8 @@
 #include "nvm_cmd.h"
 
 #include "seqlock.h"
+#include "nvshmem.h"
+#include "nvshmemx.h"
 
 #define FULL_MASK 0xFFFFFFFF
 #define FF_64 0xFFFFFFFFFFFFFFFF
@@ -49,7 +51,7 @@ void warp_memcpy(void* src, void* dst, size_t size, uint32_t mask){
  }
 
 
-template<typename T, bool SSD_SIM = true>
+template<typename T>
 struct NVSHMEM_cache_d_t {
 
     unsigned num_gpus, my_GPU_id_;
@@ -73,13 +75,14 @@ struct NVSHMEM_cache_d_t {
 
 
     uint8_t evict_policy = 0;
-    bool is_simulation = false;
-    void* sim_buf = nullptr;
 
     bool color_track_;
     int32_t* color_counters;
     uint64_t* color_meta_;
     int64_t* node_color_buffer_;
+
+    bool SSD_SIM = true;
+    void* sim_buf = nullptr;
 
     NVSHMEM_cache_d_t(seqlock* set_locks, seqlock* way_locks,uint64_t n_sets, uint64_t n_ways, uint64_t cl_size, uint64_t* keys, uint32_t* set_cnt,
                  Controller** d_ctrls, uint32_t n_ctrls, uint64_t n_blocks_per_page, uint8_t* base_addr, uint64_t* prp1, uint64_t* prp2, bool prps,
@@ -87,7 +90,8 @@ struct NVSHMEM_cache_d_t {
                  simt::atomic<uint64_t, simt::thread_scope_device>* queue_lock, simt::atomic<uint64_t, simt::thread_scope_device>* queue_extra_reads,
                 // bool color_track,
                 // int32_t* color_counter, uint64_t* color_meta, int64_t* node_color_buffer,
-                 unsigned int my_GPU_id, unsigned n_gpus
+                 unsigned int my_GPU_id, unsigned n_gpus, 
+                 bool is_simulation, float* sim_b
                  ) :
         set_locks_(set_locks),
         way_locks_(way_locks),
@@ -114,7 +118,9 @@ struct NVSHMEM_cache_d_t {
         // node_color_buffer_(node_color_buffer),
 
         my_GPU_id_(my_GPU_id),
-        num_gpus(n_gpus)
+        num_gpus(n_gpus),
+        SSD_SIM(is_simulation),
+        sim_buf(sim_b)
  
         {
             double_read = 0;
@@ -233,56 +239,83 @@ struct NVSHMEM_cache_d_t {
 
     }
 
-    // inline 
-    // __device__ 
-    // void 
-    // enqueue_second( QueuePair* qp, const uint64_t starting_lba, nvm_cmd_t* cmd, const uint16_t cid, const uint64_t pc_pos, const uint64_t pc_prev_head) {
-    //     nvm_cmd_rw_blks(cmd, starting_lba, 1);
-    //     unsigned int ns = 8;
-    //     do {
-    //         uint64_t cur_pc_head = q_head->load(simt::memory_order_relaxed);
-    //         bool sec = ((cur_pc_head < pc_prev_head) && (pc_prev_head <= pc_pos)) ||
-    //             ((pc_prev_head <= pc_pos) && (pc_pos < cur_pc_head)) ||
-    //             ((pc_pos < cur_pc_head) && (cur_pc_head < pc_prev_head));
+    inline 
+    __device__ 
+    void enqueue_second( QueuePair* qp, const uint64_t starting_lba, nvm_cmd_t* cmd, const uint16_t cid, const uint64_t pc_pos, const uint64_t pc_prev_head) {
+        nvm_cmd_rw_blks(cmd, starting_lba, 1);
+        unsigned int ns = 8;
+        do {
+            uint64_t cur_pc_head = q_head->load(simt::memory_order_relaxed);
+            bool sec = ((cur_pc_head < pc_prev_head) && (pc_prev_head <= pc_pos)) ||
+                ((pc_prev_head <= pc_pos) && (pc_pos < cur_pc_head)) ||
+                ((pc_pos < cur_pc_head) && (cur_pc_head < pc_prev_head));
 
-    //         if (sec) break;
+            if (sec) break;
 
-    //         //if not
-    //         uint64_t qlv = q_lock->load(simt::memory_order_relaxed);
-    //         //got lock
-    //         if (qlv == 0) {
-    //             qlv = q_lock->fetch_or(1, simt::memory_order_acquire);
-    //             if (qlv == 0) {
-    //                 uint64_t cur_pc_tail;// = pc->q_tail.load(simt::memory_order_acquire);
+            //if not
+            uint64_t qlv = q_lock->load(simt::memory_order_relaxed);
+            //got lock
+            if (qlv == 0) {
+                qlv = q_lock->fetch_or(1, simt::memory_order_acquire);
+                if (qlv == 0) {
+                    uint64_t cur_pc_tail;// = pc->q_tail.load(simt::memory_order_acquire);
 
-    //                 uint16_t sq_pos = sq_enqueue(&qp->sq, cmd, q_tail, &cur_pc_tail);
-    //                 uint32_t head, head_;
-    //                 uint32_t cq_pos = cq_poll(&qp->cq, cid, &head, &head_);
+                    uint16_t sq_pos = sq_enqueue(&qp->sq, cmd, q_tail, &cur_pc_tail);
+                    uint32_t head, head_;
+                    uint32_t cq_pos = cq_poll(&qp->cq, cid, &head, &head_);
 
-    //                 q_head->store(cur_pc_tail, simt::memory_order_release);
-    //                 q_lock->store(0, simt::memory_order_release);
-    //                 extra_reads->fetch_add(1, simt::memory_order_relaxed);
-    //                 cq_dequeue(&qp->cq, cq_pos, &qp->sq, head, head_);
-
+                    q_head->store(cur_pc_tail, simt::memory_order_release);
+                    q_lock->store(0, simt::memory_order_release);
+                    extra_reads->fetch_add(1, simt::memory_order_relaxed);
+                    cq_dequeue(&qp->cq, cq_pos, &qp->sq, head, head_);
 
 
-    //                 break;
-    //             }
-    //         }
-    //         #if defined(__CUDACC__) && (__CUDA_ARCH__ >= 700 || !defined(__CUDA_ARCH__))
-    //                 __nanosleep(ns);
-    //                 if (ns < 256) {
-    //                     ns *= 2;
-    //                 }
-    //         #endif    
-    //         } while(true);
 
-    // }
+                    break;
+                }
+            }
+            #if defined(__CUDACC__) && (__CUDA_ARCH__ >= 700 || !defined(__CUDA_ARCH__))
+                    __nanosleep(ns);
+                    if (ns < 256) {
+                        ns *= 2;
+                    }
+            #endif    
+            } while(true);
 
+    }
+   
+    inline 
+    __device__ 
+    void read_data(QueuePair* qp, const uint64_t starting_lba, const uint64_t n_blocks, const unsigned long long pc_entry) {
 
-    inline __device__ 
-    void read_data(QueuePair* qp, const uint64_t starting_lba, const uint64_t n_blocks, const unsigned long long pc_entry ) {
-	return;
+        nvm_cmd_t cmd;
+        uint16_t cid = get_cid(&(qp->sq));
+
+        nvm_cmd_header(&cmd, cid, NVM_IO_READ, qp->nvmNamespace);
+        uint64_t prp1, prp2;
+      
+        prp1 = prp1_[pc_entry];
+        prp2 = 0;
+        if (prps_)
+            prp2 = prp2_[pc_entry];
+    
+        nvm_cmd_data_ptr(&cmd, prp1, prp2);
+        nvm_cmd_rw_blks(&cmd, starting_lba, n_blocks);
+        uint16_t sq_pos = sq_enqueue(&qp->sq, &cmd);
+        uint32_t head, head_;
+        uint64_t pc_pos;
+        uint64_t pc_prev_head;
+
+        uint32_t cq_pos = cq_poll(&qp->cq, cid, &head, &head_);
+
+        qp->cq.tail.fetch_add(1, simt::memory_order_acq_rel);
+        pc_prev_head = q_head->load(simt::memory_order_relaxed);
+        pc_pos = q_tail->fetch_add(1, simt::memory_order_acq_rel);
+
+        cq_dequeue(&qp->cq, cq_pos, &qp->sq, head, head_);
+        enqueue_second(qp, starting_lba, &cmd, cid, pc_pos, pc_prev_head);
+
+        put_cid(&qp->sq, cid);
     }
 
     __forceinline__
@@ -300,11 +333,9 @@ struct NVSHMEM_cache_d_t {
      __forceinline__
     __device__
     void read_page_simulation(uint64_t pg_id, void* dst, uint32_t mask){
-
-    //     __nanosleep(1000*10);
-    //    void* src = sim_buf + (pg_id % 1024) * CL_SIZE;
-    //     warp_memcpy<float>(src, dst, CL_SIZE, mask);
-
+        __nanosleep(1000*10);
+        void* src = sim_buf + (pg_id) * CL_SIZE;
+        warp_memcpy<float>(src, dst, CL_SIZE, mask);
         return;
     }
                 
@@ -416,7 +447,7 @@ struct NVSHMEM_cache_d_t {
         }
         __syncwarp(mask);
         
-        if constexpr(SSD_SIM){
+        if (SSD_SIM){
             void* src = ((void*)base_addr_)+ (set_offset + way) * CL_SIZE;
             read_page_simulation(cl_id, src, mask);
         }
@@ -452,7 +483,7 @@ struct NVSHMEM_cache_d_t {
 
 
 
-template<typename T, bool SSD_SIM = true>
+template<typename T>
 struct NVSHMEM_cache_handle{
     NVSHMEM_cache_d_t<T>* cache_ptr = nullptr;
 
@@ -477,8 +508,10 @@ struct NVSHMEM_cache_handle{
 
     unsigned my_GPU_id_;
     unsigned num_gpus = 1;
+    bool track_color;
 
-
+    bool SSD_SIM;
+    float* sim_buf;
     // uint64_t num_color_= 1;
     // int32_t* color_counters = nullptr;
     // int32_t* device_color_counters = nullptr;
@@ -486,14 +519,23 @@ struct NVSHMEM_cache_handle{
 
     __host__ 
     NVSHMEM_cache_handle(uint64_t num_sets, uint64_t  num_ways, uint64_t cl_size, const std::vector<Controller*>& ctrls, 
-                         unsigned int my_GPU_id, unsigned n_gpus) :
+                         unsigned int my_GPU_id, unsigned n_gpus, bool track_color_flag, bool is_simulation, float* sim_b) :
     num_sets_(num_sets),
     num_ways_(num_ways),
     CL_SIZE_(cl_size),
     my_GPU_id_(my_GPU_id),
-    num_gpus(n_gpus)
+    num_gpus(n_gpus),
+    track_color(track_color_flag),
+    SSD_SIM(is_simulation),
+    sim_buf(sim_b)
     {
 
+        if(is_simulation){
+            if(sim_b == nullptr){
+                printf("Error: the data buffer for simulation is nullptr\n");
+                return;
+            }
+        }
         auto cudaDevice = my_GPU_id;
         uint64_t* prp1, *prp2;
 
@@ -510,19 +552,19 @@ struct NVSHMEM_cache_handle{
 
         cuda_err_chk(cudaMalloc((void**)&cache_ptr, sizeof(NVSHMEM_cache_d_t<T>)));
 
-    //    if(color_track){
-    //         printf("allocating color counters num_color %i \n", num_color_);
-    //         cuda_err_chk(cudaHostAlloc((int32_t **)&color_counters, sizeof(int32_t) * num_color_ , cudaHostAllocMapped));
-    //         cuda_err_chk(cudaHostGetDevicePointer((int32_t **)&device_color_counters, (int32_t *)color_counters, 0));
-    //         cuda_err_chk(cudaMemset(device_color_counters, 0x0, (uint64_t) sizeof(int32_t) * num_color_));
+       if(track_color){
+            //printf("allocating color counters num_color %i \n", num_color_);
+            // cuda_err_chk(cudaHostAlloc((int32_t **)&color_counters, sizeof(int32_t) * num_color_ , cudaHostAllocMapped));
+            // cuda_err_chk(cudaHostGetDevicePointer((int32_t **)&device_color_counters, (int32_t *)color_counters, 0));
+            // cuda_err_chk(cudaMemset(device_color_counters, 0x0, (uint64_t) sizeof(int32_t) * num_color_));
 
-    //         cuda_err_chk(cudaMalloc((void**)&color_meta, sizeof(uint64_t) * num_sets_ * num_ways_));
-    //         cuda_err_chk(cudaMemset(color_meta, 0x0, sizeof(uint64_t) * num_sets_ * num_ways_));
-    //     }
+            // cuda_err_chk(cudaMalloc((void**)&color_meta, sizeof(uint64_t) * num_sets_ * num_ways_));
+            // cuda_err_chk(cudaMemset(color_meta, 0x0, sizeof(uint64_t) * num_sets_ * num_ways_));
+        }
     
         uint64_t cache_size = CL_SIZE_ * num_sets_ * num_ways_;
         // Backend storage is CPU memory
-        if constexpr (SSD_SIM){
+        if (SSD_SIM){
             cuda_err_chk(cudaMalloc((void**)&base_addr, cache_size));
         }
         // Backend storage is NVMe SSDs
@@ -552,7 +594,7 @@ struct NVSHMEM_cache_handle{
         uint64_t n_blocks_per_page = 0;
        
 
-        if constexpr (SSD_SIM){
+        if (SSD_SIM){
             prps = false;
         }
         else{
@@ -583,7 +625,8 @@ struct NVSHMEM_cache_handle{
         d_ctrls, n_ctrls, n_blocks_per_page, base_addr, prp1, prp2, prps,
         cache_q_head, cache_q_tail, cache_q_lock, cache_extra_reads, 
         //color_track, device_color_counters, color_meta, node_color_buffer,      
-        my_GPU_id_, num_gpus);
+        my_GPU_id_, num_gpus, 
+        SSD_SIM, sim_buf);
 
 
         cuda_err_chk(cudaMemcpy(cache_ptr, &cache_host, sizeof(NVSHMEM_cache_d_t<T>), cudaMemcpyHostToDevice));
@@ -598,7 +641,7 @@ struct NVSHMEM_cache_handle{
         cuda_err_chk(cudaFree(keys_));
         cuda_err_chk(cudaFree(cache_ptr));
 
-        if constexpr (SSD_SIM){
+        if (SSD_SIM){
             cuda_err_chk(cudaFree(base_addr));
         }
     }
