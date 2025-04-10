@@ -84,13 +84,14 @@ struct NVSHMEM_cache_d_t {
     bool SSD_SIM = true;
     void* sim_buf = nullptr;
 
+    int global_rank;
+
     NVSHMEM_cache_d_t(seqlock* set_locks, seqlock* way_locks,uint64_t n_sets, uint64_t n_ways, uint64_t cl_size, uint64_t* keys, uint32_t* set_cnt,
                  Controller** d_ctrls, uint32_t n_ctrls, uint64_t n_blocks_per_page, uint8_t* base_addr, uint64_t* prp1, uint64_t* prp2, bool prps,
                  simt::atomic<uint64_t, simt::thread_scope_device>* queue_head, simt::atomic<uint64_t, simt::thread_scope_device>* queue_tail, 
                  simt::atomic<uint64_t, simt::thread_scope_device>* queue_lock, simt::atomic<uint64_t, simt::thread_scope_device>* queue_extra_reads,
-                // bool color_track,
-                // int32_t* color_counter, uint64_t* color_meta, int64_t* node_color_buffer,
-                 unsigned int my_GPU_id, unsigned n_gpus, 
+                  bool color_track, int64_t* node_color_buffer, int32_t* color_counter, uint64_t* color_meta, 
+                 int g_rank, unsigned int my_GPU_id, unsigned n_gpus, 
                  bool is_simulation, float* sim_b
                  ) :
         set_locks_(set_locks),
@@ -112,11 +113,12 @@ struct NVSHMEM_cache_d_t {
         q_lock(queue_lock),
         extra_reads(queue_extra_reads),
         
-        // color_track_(color_track),
-        // color_counters(color_counter),
-        // color_meta_(color_meta),
-        // node_color_buffer_(node_color_buffer),
+        color_track_(color_track),
+        color_counters(color_counter),
+        color_meta_(color_meta),
+        node_color_buffer_(node_color_buffer),
 
+        global_rank(g_rank),
         my_GPU_id_(my_GPU_id),
         num_gpus(n_gpus),
         SSD_SIM(is_simulation),
@@ -128,27 +130,16 @@ struct NVSHMEM_cache_d_t {
             miss_cnt = 0;
         }
 
-    // __forceinline__
-    // __device__
-    // void
-    // print_stats(){
-    //     printf("GPU hit count: %llu CPU hit count: %llu\n", (unsigned long long) gpu_hit_cnt,  (unsigned long long) cpu_hit_cnt);            
-    //     printf("GPU miss count: %llu CPU miss count: %llu\n", (unsigned long long) gpu_miss_cnt,  (unsigned long long) cpu_miss_cnt);            
-
-    //     uint64_t system_hit = gpu_hit_cnt + cpu_hit_cnt;
-    //     uint64_t system_miss = gpu_miss_cnt + cpu_miss_cnt;
-        
-    //     float overall_hit_ratio = (float) (system_hit) / (system_hit + system_miss);
-    //     float gpu_hit_ratio = (float) (gpu_hit_cnt) / (system_hit + system_miss);
-    //     float cpu_hit_ratio = (float) (cpu_hit_cnt) / (system_hit + system_miss);
-
-    //     printf("System Hit ratio: %f GPU hit ratio: %f CPU hit ratio:%f\n", overall_hit_ratio, gpu_hit_ratio, cpu_hit_ratio);
-
-    //     gpu_hit_cnt = 0;
-    //     gpu_miss_cnt = 0;
-    //     cpu_hit_cnt = 0;
-    //     cpu_miss_cnt = 0;
-    // }
+    __forceinline__
+    __device__
+    void
+    print_stats(){
+        printf("Global Rank: %i Local Rank:%i hit count: %llu miss count: %llu\n", global_rank, (int) my_GPU_id_, (unsigned long long) hit_cnt,  (unsigned long long) miss_cnt);            
+        float gpu_hit_ratio = (float) (hit_cnt) / (hit_cnt + miss_cnt);
+        printf("Global Rank: %i Local Rank:%i  GPU hit ratio: %f\n",  global_rank, (int) my_GPU_id_, gpu_hit_ratio);
+        hit_cnt = 0;
+        miss_cnt = 0;
+    }
 
 
 
@@ -333,6 +324,7 @@ struct NVSHMEM_cache_d_t {
      __forceinline__
     __device__
     void read_page_simulation(uint64_t pg_id, void* dst, uint32_t mask){
+        //return;
         __nanosleep(1000*10);
         void* src = sim_buf + (pg_id) * CL_SIZE;
         warp_memcpy<float>(src, dst, CL_SIZE, mask);
@@ -425,22 +417,22 @@ struct NVSHMEM_cache_d_t {
         way = evict(lane, warp_leader, mask, set_id, evict_policy);
 
         if(lane == warp_leader) {
-            // if(color_track_){
-            //     int32_t prev = atomicSub(&(color_counters[color_meta_[set_offset + way]]), 1); 
-            // }
+            if(color_track_){
+                int32_t prev = atomicSub(&(color_counters[color_meta_[set_offset + way]]), 1); 
+            }
             (cur_cl_seqlock + way) -> write_busy_lock();
         }
         //Check
         uint64_t old_key =  keys_[set_offset + way];
         keys_[set_offset + way] = cl_id;
 
-        // if(color_track_){
-        //     int64_t color = node_color_buffer_[cl_id]; 
-        //     color_meta_[set_offset + way] = color;
-        //     if(lane == warp_leader) {
-        //         atomicAdd(&(color_counters[color]), 1); 
-        //     }
-        // }
+        if(color_track_){
+            int64_t color = node_color_buffer_[cl_id]; 
+            color_meta_[set_offset + way] = color;
+            if(lane == warp_leader) {
+                atomicAdd(&(color_counters[color]), 1); 
+            }
+        }
 
         if(lane == warp_leader) {
             cur_set_lock->write_unlock();
@@ -509,23 +501,29 @@ struct NVSHMEM_cache_handle{
     unsigned my_GPU_id_;
     unsigned num_gpus = 1;
     bool track_color;
+    int64_t* color_data_buf;
+    int32_t* color_counters = nullptr;
+    int32_t* device_color_counters = nullptr;
+    uint64_t* color_meta;
 
     bool SSD_SIM;
     float* sim_buf;
     // uint64_t num_color_= 1;
-    // int32_t* color_counters = nullptr;
-    // int32_t* device_color_counters = nullptr;
-    // uint64_t* color_meta;
+
+    int global_rank;
+
 
     __host__ 
-    NVSHMEM_cache_handle(uint64_t num_sets, uint64_t  num_ways, uint64_t cl_size, const std::vector<Controller*>& ctrls, 
-                         unsigned int my_GPU_id, unsigned n_gpus, bool track_color_flag, bool is_simulation, float* sim_b) :
+    NVSHMEM_cache_handle(uint64_t num_sets, uint64_t  num_ways, uint64_t cl_size, const std::vector<Controller*>& ctrls, int g_rank,
+                         unsigned int my_GPU_id, unsigned n_gpus, bool track_color_flag, int64_t* color_data_ptr, int num_color, bool is_simulation, float* sim_b) :
     num_sets_(num_sets),
     num_ways_(num_ways),
     CL_SIZE_(cl_size),
+    global_rank(g_rank),
     my_GPU_id_(my_GPU_id),
     num_gpus(n_gpus),
     track_color(track_color_flag),
+    color_data_buf(color_data_ptr),
     SSD_SIM(is_simulation),
     sim_buf(sim_b)
     {
@@ -554,12 +552,12 @@ struct NVSHMEM_cache_handle{
 
        if(track_color){
             //printf("allocating color counters num_color %i \n", num_color_);
-            // cuda_err_chk(cudaHostAlloc((int32_t **)&color_counters, sizeof(int32_t) * num_color_ , cudaHostAllocMapped));
-            // cuda_err_chk(cudaHostGetDevicePointer((int32_t **)&device_color_counters, (int32_t *)color_counters, 0));
-            // cuda_err_chk(cudaMemset(device_color_counters, 0x0, (uint64_t) sizeof(int32_t) * num_color_));
+            cuda_err_chk(cudaHostAlloc((int32_t **)&color_counters, sizeof(int32_t) * num_color , cudaHostAllocMapped));
+            cuda_err_chk(cudaHostGetDevicePointer((int32_t **)&device_color_counters, (int32_t *)color_counters, 0));
+            cuda_err_chk(cudaMemset(device_color_counters, 0x0, (uint64_t) sizeof(int32_t) * num_color));
 
-            // cuda_err_chk(cudaMalloc((void**)&color_meta, sizeof(uint64_t) * num_sets_ * num_ways_));
-            // cuda_err_chk(cudaMemset(color_meta, 0x0, sizeof(uint64_t) * num_sets_ * num_ways_));
+            cuda_err_chk(cudaMalloc((void**)&color_meta, sizeof(uint64_t) * num_sets_ * num_ways_));
+            cuda_err_chk(cudaMemset(color_meta, 0x0, sizeof(uint64_t) * num_sets_ * num_ways_));
         }
     
         uint64_t cache_size = CL_SIZE_ * num_sets_ * num_ways_;
@@ -624,8 +622,9 @@ struct NVSHMEM_cache_handle{
         NVSHMEM_cache_d_t<T> cache_host(d_set_locks, d_way_locks, num_sets_, num_ways_, CL_SIZE_, keys_, set_cnt_, 
         d_ctrls, n_ctrls, n_blocks_per_page, base_addr, prp1, prp2, prps,
         cache_q_head, cache_q_tail, cache_q_lock, cache_extra_reads, 
+        track_color, color_data_buf, device_color_counters, color_meta,
         //color_track, device_color_counters, color_meta, node_color_buffer,      
-        my_GPU_id_, num_gpus, 
+        global_rank, my_GPU_id_, num_gpus, 
         SSD_SIM, sim_buf);
 
 
@@ -644,6 +643,10 @@ struct NVSHMEM_cache_handle{
         if (SSD_SIM){
             cuda_err_chk(cudaFree(base_addr));
         }
+        if (track_color){
+            cuda_err_chk(cudaFreeHost(color_counters));
+            cuda_err_chk(cudaFree(color_meta));
+        }
     }
 
     __host__ 
@@ -651,11 +654,15 @@ struct NVSHMEM_cache_handle{
     get_ptr(){
         return cache_ptr;
     }
+    
+    int32_t* 
+    get_color_counter_ptr(){
+        return color_counters;
+    }
 
-    // int32_t* 
-    // get_color_counter_ptr(){
-    //     return color_counters;
-    // }
+
+   
+
 
 };
 

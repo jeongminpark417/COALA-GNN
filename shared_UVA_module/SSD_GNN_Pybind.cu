@@ -30,13 +30,15 @@ PYBIND11_MODULE(SSD_GNN_Pybind, m) {
         .def("cleanup", &SharedUVAManager::cleanup);
 
     py::class_<SSD_GNN_SSD_Controllers>(m, "SSD_GNN_SSD_Controllers")
-        .def(py::init<uint32_t, uint64_t, uint64_t, uint32_t, int, bool>());
+        .def(py::init<uint32_t, uint32_t, uint64_t, uint64_t, uint32_t, int, bool>());
 
     py::class_<SSD_GNN_NVSHMEM_Cache>(m, "SSD_GNN_NVSHMEM_Cache")
-        .def(py::init<SSD_GNN_SSD_Controllers, int, uint64_t, uint64_t>())
+        .def(py::init<SSD_GNN_SSD_Controllers, Node_distributor_pybind&, int, int, uint64_t, uint64_t>())
         .def("send_requests", &SSD_GNN_NVSHMEM_Cache::send_requests)
-        .def("read_feature", &SSD_GNN_NVSHMEM_Cache::read_feature);
-
+        .def("read_feature", &SSD_GNN_NVSHMEM_Cache::read_feature)
+        .def("get_cache_data", &SSD_GNN_NVSHMEM_Cache::get_cache_data)
+        .def("print_stats", &SSD_GNN_NVSHMEM_Cache::print_stats);
+        
     py::class_<Node_distributor_pybind>(m, "Node_distributor_pybind")
         .def(py::init<uint64_t, int>()) 
         .def(py::init<uint64_t, int, int, int, int, const std::string&, const std::string&, const std::string&>())  

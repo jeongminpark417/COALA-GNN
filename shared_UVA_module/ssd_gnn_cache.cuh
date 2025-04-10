@@ -3,7 +3,7 @@
 #include <ctrl.h>  // for NVME controller
 #include "nvshmem_cache.h"
 #include "cache_kernel.cu"
-
+#include "node_distributor_pybind.cuh"
 
 //Datatype for feature information is Float
 class SSD_GNN_SSD_Controllers{
@@ -26,19 +26,19 @@ class SSD_GNN_SSD_Controllers{
         std::vector<Controller *> ctrls;
 
 
-    SSD_GNN_SSD_Controllers(uint32_t num_ctrls, uint64_t n_elems, uint64_t read_off, uint32_t device_id, int feat_dim, bool sim)
-        : n_ctrls(num_ctrls), num_elements(n_elems), cudaDevice(device_id), offset(read_off), dim(feat_dim), SSD_SIM(sim){
+    SSD_GNN_SSD_Controllers(uint32_t num_ctrls, uint32_t p_size, uint64_t n_elems, uint64_t read_off, uint32_t device_id, int feat_dim, bool sim)
+        : n_ctrls(num_ctrls), page_size(p_size), num_elements(n_elems), cudaDevice(device_id), offset(read_off), dim(feat_dim), SSD_SIM(sim){
         
-        if(dim <= 512)
+        
+        if(dim <= 128)
+            cache_dim = 128;
+        else if(dim <= 256)
+            cache_dim = 256;
+        else if(dim <= 512)
             cache_dim = 512;
         else if(dim <= 1024)
             cache_dim = 1024;
-        else if(dim <= 2048)
-            cache_dim = 2048;
-        else if (dim <= 4096)
-            cache_dim = 4096;
-        else if (dim <= 8192)
-            cache_dim = 8192;
+    
         else
             throw std::runtime_error("Only Feature Embedding Size less than 8KB is supported\n");
 
@@ -65,24 +65,37 @@ class SSD_GNN_NVSHMEM_Cache {
         int dim;
         int cache_dim;
         bool track_color = true;
+        int64_t* color_buffer_ptr = nullptr;
+        int num_color;
+
         bool is_simulation = false;
         float* sim_buf;
         
+    
+        NVSHMEM_cache_handle<float>* cache_handle;
         NVSHMEM_cache_d_t<float>* cache_ptr;
         unsigned int* d_request_counters;
 
+        int global_rank;
+
+
     public:
-        SSD_GNN_NVSHMEM_Cache(SSD_GNN_SSD_Controllers SSD_Controllers, int n_gpus, uint64_t cache_size, uint64_t sim_b): num_gpus(n_gpus){
+        SSD_GNN_NVSHMEM_Cache(SSD_GNN_SSD_Controllers SSD_Controllers, Node_distributor_pybind& node_distributer, int g_rank, int n_gpus, uint64_t cache_size, uint64_t sim_b): 
+            num_gpus(n_gpus),
+            global_rank(g_rank)
+            {
             if(sim_b != 0) 
                 is_simulation = true;
             sim_buf = (float*) sim_b;
+            color_buffer_ptr = node_distributer.get_color_buffer_ptr();
+            num_color = node_distributer.get_num_colors();
             local_rank = SSD_Controllers.cudaDevice;
             dim = SSD_Controllers.dim;
             cache_dim = SSD_Controllers.cache_dim;
             num_pages = cache_size * 1024LL*1024/(SSD_Controllers.page_size);
             num_sets = num_pages / num_ways;
-            auto cache_handle = new NVSHMEM_cache_handle<float>(
-                num_sets, num_ways, SSD_Controllers.page_size, SSD_Controllers.ctrls, SSD_Controllers.cudaDevice, num_gpus, track_color, is_simulation, sim_buf);
+            cache_handle = new NVSHMEM_cache_handle<float>(
+                num_sets, num_ways, SSD_Controllers.page_size, SSD_Controllers.ctrls,  global_rank, SSD_Controllers.cudaDevice, num_gpus, track_color, color_buffer_ptr, num_color, is_simulation, sim_buf);
                                                         
                                                         // cpu_ways, is_simulation, sim_buf,
                                                         //     use_color_data, num_colors, color_buffer_ptr);
@@ -140,7 +153,7 @@ class SSD_GNN_NVSHMEM_Cache {
             unsigned int h_request_counters[num_gpus];
             cuda_err_chk(cudaMemcpy(h_request_counters, d_request_counters, sizeof(unsigned int) * num_gpus,  cudaMemcpyDeviceToHost));
                 
-
+         //   printf("dim :%i cache_dim %i\n", (int) dim, (int) cache_dim);
             for (int i = 0; i < num_gpus; i++) {
                 uint64_t b_size = 128;
                 uint64_t n_warp = b_size / 32;
@@ -158,7 +171,28 @@ class SSD_GNN_NVSHMEM_Cache {
             nvshmem_barrier_all();
 
             return;
-        }                            
+        }
+
+        void get_cache_data(int64_t ret_i_ptr){
+            int32_t* cache_meta_data = cache_handle->get_color_counter_ptr();
+            int32_t* dst = (int32_t*) ret_i_ptr;
+
+            int32_t sum = 0;
+            for(int i = 0; i < num_color; i++ ){
+                dst[i] = cache_meta_data[i];
+            }
+            // printf("sum:%i\n", sum);
+            return;
+        }
+
+        void print_stats(){
+            print_stats_kernel<<<1,1>>>(cache_ptr);
+        }
+
+        ~SSD_GNN_NVSHMEM_Cache(){
+            delete cache_handle;
+        }
+                                    
 
 };
 

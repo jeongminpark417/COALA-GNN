@@ -148,7 +148,8 @@ class Node_distributor_pybind {
         global_batch_size = domain_batch_size * num_nodes;
     }
 
-    void distribute_node_with_affinity(uint64_t i_parsed_ptr, const std::vector<uint64_t>&  meta_data_list){
+    void distribute_node_with_affinity(uint64_t offset, uint64_t i_parsed_ptr, const std::vector<uint64_t>&  meta_data_list){
+        //int64_t* ptr = (int64_t*) i_ptr;
 
         if(score_ptr == nullptr || topk_ptr == nullptr || color_ptr == nullptr){
             std::cout << "Error: Node_distributor_pybind is not created with color information.\n";
@@ -163,64 +164,77 @@ class Node_distributor_pybind {
         int cur_max_part = 0;
         double max_score = -1.0;
 
-        for(int i = 0; i < item_len; i++){
-            int64_t node_id = item_ptr[i];
+        for(int64_t i = 0; i < item_len; i++){
+            int64_t id = item_ptr[i+offset];
 
-            int64_t node_color = color_buffer_ptr[node_id];
+    //            printf("i: %i node id: %i \n", (int) i, (int) id);
+
+            int64_t node_color = color_buffer_ptr[id];
             cur_max_part = 0;
             max_score = -1.0;
 
-        for(int j = 0; j < num_nodes; j++){
-            int32_t* meta_ptr = (int32_t*)(meta_data_list[j]);
-            double cur_score = 0;
-            double prev_score = 0;
-            double prev_neigh_score = 0;
-            double prev_affinity = 0;
+            for(int j = 0; j < num_nodes; j++){
+                int32_t* meta_ptr = (int32_t*)(meta_data_list[j]);
+                double cur_score = 0;
+                double prev_score = 0;
+                double prev_neigh_score = 0;
+                double prev_affinity = 0;
 
-            if(node_color == 0){
-                cur_score = 0.0;
-            } 
-            else{
-                for(int k = 0; k < topk; k++){
-                    int64_t neigh_color = topk_buffer_ptr[(node_color - 1) * topk + k];
-                    double neigh_affinity = score_buffer_ptr[(node_color - 1) * topk + k];
-                    double neigh_score = 0.0;
-                    if(neigh_color != 0){
-                    if(meta_ptr[neigh_color] == 0 )
-                        continue;
-                    neigh_score =  (double) (meta_ptr[neigh_color]);
-                    prev_score = cur_score;
-                    cur_score += (neigh_score * neigh_affinity );
+                if(node_color == 0){
+                    cur_score = 0.0;
+                } 
+                else{
+                    for(int k = 0; k < topk; k++){
+                        int64_t neigh_color = topk_buffer_ptr[(node_color - 1) * topk + k];
+                        double neigh_affinity = score_buffer_ptr[(node_color - 1) * topk + k];
+                        double neigh_score = 0.0;
+                        if(neigh_color != 0){
+                        if(meta_ptr[neigh_color] == 0 )
+                            continue;
+                        neigh_score =  (double) (meta_ptr[neigh_color]);
+                        prev_score = cur_score;
+                        cur_score += (neigh_score * neigh_affinity );
+                        }
+                        if(neigh_score < 0.0 || neigh_affinity < 0.0){
+                        int32_t neigh_score_int = (meta_ptr[neigh_color]);
+                        }
+                        prev_affinity = neigh_affinity;
+                        prev_neigh_score = neigh_score;
                     }
-                    if(neigh_score < 0.0 || neigh_affinity < 0.0){
-                    int32_t neigh_score_int = (meta_ptr[neigh_color]);
-                    }
-                    prev_affinity = neigh_affinity;
-                    prev_neigh_score = neigh_score;
+                }
+                
+                double before_score = cur_score;
+
+                if(bucket_len[j] == domain_batch_size)
+                cur_score = -1.0;
+
+                if(cur_score > max_score){
+                    cur_max_part = j;
+                    max_score = cur_score;
                 }
             }
-        
-            double before_score = cur_score;
-
-            if(bucket_len[j] == batch_size)
-            cur_score = -1.0;
-
-            if(cur_score > max_score){
-            cur_max_part = j;
-            max_score = cur_score;
-            }
-      }
       
-
-     if(cur_max_part == node_id){
-       return_ptr[bucket_len[cur_max_part]] = node_id;
-     }
-      bucket_len[cur_max_part]+=1;
+        if(cur_max_part == node_id){
+          //  printf("Insert noid id: %i to GPU: %i bucket len: %i\n", (int) id, (int) cur_max_part, (int) bucket_len[cur_max_part]);
+            return_ptr[bucket_len[cur_max_part]] = id;
+        }
+        bucket_len[cur_max_part]+=1;
     }
   }
 
   int get_num_colors(){
     return num_colors;
+  }
+
+  int64_t*
+  get_color_buffer_ptr(){
+    return  color_buffer_ptr;
+  }
+
+  ~Node_distributor_pybind(){
+    cudaFreeHost(color_ptr);
+    cudaFreeHost(topk_ptr);
+    cudaFreeHost(score_ptr);
   }
 };
 

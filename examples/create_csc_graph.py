@@ -11,21 +11,22 @@ import numpy as np
 import torch
 from models import *
 import tqdm
-import sys
 
 #import GIDS
 from Shared_Tensor import Shared_UVA_Tensor_Manager
 
-from ssd_gnn_dataloader import IGBDatast_Shared_UVA, IGBDatast_Shared_CSC_UVA, OGBDataset_Shared_UVA, OGBDataset_Shared_CSC_UVA
+from ssd_gnn_dataloader import IGBDatast_Shared_UVA, OGBDataset_Shared_UVA
 
 
 import ctypes
-import mpi4py
-from mpi4py import MPI
-import torch.distributed as dist
+import os.path as osp
 
-from Shared_Tensor import Shared_UVA_Tensor_Manager, MPI_Comm_Manager, Node_Distributor
-from Shared_Tensor import SSD_INFO, SSD_GNN_DataLoader
+import mpi4py
+## from mpi4py import MPI
+# import torch.distributed as dist
+
+# from Shared_Tensor import Shared_UVA_Tensor_Manager, MPI_Comm_Manager, Node_Distributor
+# from Shared_Tensor import SSD_INFO, SSD_GNN_DataLoader
 
 
 
@@ -48,7 +49,7 @@ def read_graph_file(filename):
     return graph_dict
 
 
-def train( g, args, device, Comm_Manager, dim, page_size, num_classes, feat_shared_uva = None):
+def train( g, args, device, Comm_Manager, dim, feat_shared_uva = None):
     if(feat_shared_uva != None):
         print("SSD_GNN simulation train")
     else:
@@ -80,7 +81,6 @@ def train( g, args, device, Comm_Manager, dim, page_size, num_classes, feat_shar
     fan_out = [int(fanout) for fanout in args.fan_out.split(',')]
 
     SSD_manager = SSD_INFO(num_ssds = 1, 
-                           page_size = page_size,
                            num_elems = 1024, 
                            ssd_read_offset = 0)
 
@@ -103,19 +103,18 @@ def train( g, args, device, Comm_Manager, dim, page_size, num_classes, feat_shar
     print("train dataloader init done")
 
     if args.model_type == 'gcn':
-        model = GCN(dim, args.hidden_channels, num_classes, 
+        model = GCN(in_feats, args.hidden_channels, args.num_classes, 
             args.num_layers).to(device)
     if args.model_type == 'sage':
-        model = SAGE(dim, args.hidden_channels, num_classes, 
-            args.num_layers).to(device)
-        # model = DistSAGE(dim, args.hidden_channels, num_classes, args.num_layers, torch.nn.functional.relu
-        #     ).to(device)
+        #model = SAGE(in_feats, args.hidden_channels, args.num_classes, 
+        #    args.num_layers).to(device)
+        model = DistSAGE(in_feats, args.hidden_channels, args.num_classes, args.num_layers, torch.nn.functional.relu
+            ).to(device)
     if args.model_type == 'gat':
-        model = GAT(dim, args.hidden_channels, num_classes, 
+        model = GAT(in_feats, args.hidden_channels, args.num_classes, 
             args.num_layers,  args.num_heads).to(device)
 
 
-    model = torch.nn.parallel.DistributedDataParallel(model)
 
     loss_fcn = nn.CrossEntropyLoss().to(device)
     optimizer = optim.Adam(
@@ -129,32 +128,32 @@ def train( g, args, device, Comm_Manager, dim, page_size, num_classes, feat_shar
     num_sampled_nodes = 0
     print("Training start")
     model.train()
-    for epoch in range(args.epochs):
-        print(f"Epoch: {epoch}")
-        epoch_start = time.time()
-        for step, (input_nodes, seeds, blocks, fetch_feature) in enumerate(train_loader):
-            num_sampled_nodes += len(input_nodes)
+    for step, (input_nodes, seeds, blocks, fetch_feature) in enumerate(train_loader):
+        num_sampled_nodes += len(input_nodes)
 
-            if(step % 100 == 0):
-                print(f"Rank: {Comm_Manager.local_rank} step: {step}")
+        print(f"fetch feature: {fetch_feature}")
+        print(f"fetch feature sahpe: {fetch_feature.shape}")
 
+        if(step % 100 == 0):
+            print(f"step: {step}")
 
-            count += 1
-            
-            batch_labels = blocks[-1].dstdata['labels']
-            blocks = [block.int().to(device) for block in blocks]
-            batch_labels = batch_labels.view(-1).to(device)
-            batch_pred = model(blocks, fetch_feature)
-            loss = loss_fcn(batch_pred, batch_labels)
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
+        if(step == 4):
+            break
+        count += 1
+        
+        batch_labels = blocks[-1].dstdata['labels']
+        blocks = [block.int().to(device) for block in blocks]
+        batch_labels = batch_labels.to(device)
+        batch_pred = model(blocks, fetch_feature)
+        loss = loss_fcn(batch_pred, batch_labels)
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
 
-        epoch_end = time.time()
-        print(f"Epoch Time: {epoch_end - epoch_start}")
-        print(f"Total number of iterations: {count}")
-        print(f"Number of sampled nodes : {num_sampled_nodes}")
-        train_loader.print_stats()
+        
+    print(f"Total number of iterations: {count}")
+    print(f"Number of sampled nodes : {num_sampled_nodes}")
+    train_loader.print_stats()
 
     Test_Node_Distributor_Manager = Node_Distributor(Comm_Manager, test_nid, args.batch_size, color_file, topk_file, score_file)
     test_loader = SSD_GNN_DataLoader(
@@ -185,7 +184,7 @@ def train( g, args, device, Comm_Manager, dim, page_size, num_classes, feat_shar
       
             blocks = [block.to(device) for block in blocks]
             batch_labels = blocks[-1].dstdata['labels']
-            batch_labels = batch_labels.view(-1)
+            
             labels.append(blocks[-1].dstdata['label'].cpu().numpy())
             predictions.append(model(blocks, fetch_feature).argmax(1).cpu().numpy())
             count += 1
@@ -229,7 +228,7 @@ if __name__ == '__main__':
     parser.add_argument('--hidden_channels', type=int, default=128)
     parser.add_argument('--learning_rate', type=float, default=0.01)
     parser.add_argument('--decay', type=float, default=0.001)
-    parser.add_argument('--epochs', type=int, default=1)
+    parser.add_argument('--epochs', type=int, default=2)
     parser.add_argument('--num_layers', type=int, default=3)
     parser.add_argument('--num_heads', type=int, default=4)
     parser.add_argument('--log_every', type=int, default=2)
@@ -254,64 +253,60 @@ if __name__ == '__main__':
     args = parser.parse_args()
     labels = None
 
-    os.environ['MASTER_ADDR'] = 'localhost'
-    os.environ['MASTER_PORT'] = str(15385)
-
-
-    in_feats = args.cache_dim
-
-    if not MPI.Is_initialized():
-        print("MPI init")
-        MPI.Init()
-
-    Comm_Manager = MPI_Comm_Manager()
-    device = 'cuda:' + str(Comm_Manager.local_rank)
-    print("device: ", device)
-    torch.cuda.set_device(device)
-
-    Comm_Manager.initialize_nested_process_group()
 
 
     if(args.data == 'IGB'):
         print("Dataset: IGB")
-        dataset = IGBDatast_Shared_CSC_UVA(args, Comm_Manager, device)        
-        g = dataset[0]
-        dim = 1024
-        page_size = 4096
-        num_classes = args.num_classes
+        edge_path = osp.join(args.path, args.dataset_size, 'processed', 'paper__cites__paper', 'edge_index.npy')
+        edge_array = np.load(edge_path)
+        node_edges = torch.from_numpy(edge_array)
+
+        def num_nodes(size):
+            if size == 'experimental':
+                return 100000
+            elif size == 'small':
+                return 1000000
+            elif size == 'medium':
+                return 10000000
+            elif size == 'large':
+                return 100000000
+            elif size == 'full':
+                return 269346174
+
+        n_nodes = num_nodes(args.dataset_size)
+        graph = dgl.graph((node_edges[:, 0],node_edges[:, 1]), num_nodes=n_nodes)
+        graph  = graph.formats('csc')
+        indptr, indices, edge_ids =  graph.adj_tensors('csc')
+        print(f"Indptr shape: {indptr.shape} indicies shape:{indices.shape} Edge id shape: {edge_ids.shape}")
+        max_node = torch.max(indices)
+        print(f"max node: {max_node}")
+        out_edge_path = osp.join(args.path, args.dataset_size, 'processed', 'paper__cites__paper')
+        np.save(out_edge_path + '/csc_indptr.npy', indptr.numpy())
+        np.save(out_edge_path + '/csc_indices.npy', indices.numpy())
+        np.save(out_edge_path + '/csc_edge_ids.npy', edge_ids.numpy())
+
+
     elif(args.data == 'OGB'):
         print("Dataset: OGB")
-        dataset = OGBDataset_Shared_CSC_UVA(args, Comm_Manager, device)        
-        g = dataset[0]
-        dim = 128
-        page_size = 512
-        num_classes = 172
+        edge_path = osp.join(args.path, 'raw' ,'edge_index.npy')
+        edge_array = np.load(edge_path)
+        node_edges = torch.from_numpy(edge_array)
+        n_nodes = 111059956	
+        graph = dgl.graph((node_edges[0,:],node_edges[1,:]), num_nodes=n_nodes)
+        graph  = graph.formats('csc')
+        indptr, indices, edge_ids =  graph.adj_tensors('csc')
+        print(f"Indptr shape: {indptr.shape} indicies shape:{indices.shape} Edge id shape: {edge_ids.shape}")
+        max_node = torch.max(indices)
+        print(f"max node: {max_node}")
+        out_edge_path = osp.join(args.path, 'raw')
+        np.save(out_edge_path + '/csc_indptr.npy', indptr.numpy())
+        np.save(out_edge_path + '/csc_indices.npy', indices.numpy())
+        np.save(out_edge_path + '/csc_edge_ids.npy', edge_ids.numpy())
+
     else:
         print("Unsupported Dataset")
         # dataset = OGBDGLDataset(args)
         # g = dataset[0]
         # g  = g.formats('csc')
-        sys.exit(1)
-    g.ndata['labels'] = g.ndata['label']
 
-    
-
-    print(f"RANK = {os.environ.get('RANK')}")
-    print(f"WORLD_SIZE = {os.environ.get('WORLD_SIZE')}")
-    print(f"MASTER_ADDR = {os.environ.get('MASTER_ADDR')}")
-    print(f"MASTER_PORT = {os.environ.get('MASTER_PORT')}")
-
-    os.environ['MASTER_ADDR'] = 'localhost'
-    os.environ['MASTER_PORT'] = '12345'
-
-    feat_data = None
-    if(args.feat_cpu):
-        feat_data = dataset.feat_data
-
-#    feat_data = torch.Tensor([1,2])
-    train( g, args, device, Comm_Manager, dim, page_size, num_classes, feat_data)
-
-
-    Comm_Manager.destroy_process_group()
-    MPI.Finalize()
-
+    print("Files are created")

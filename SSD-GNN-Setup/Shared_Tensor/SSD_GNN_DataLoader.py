@@ -1,91 +1,87 @@
 from .SSD_GNN_Manager import SSD_GNN_Manager
 import torch
+import os
+import threading
+import torch.distributed as dist
 
 #CHECK THIS CLASS
-class SSD_GNN_CollateWrapper(object):
+class SSD_GNN_Node_Distribution_Scheduler(object):
     def __init__(self, 
                 node_distributor, # Node_Distributor
+                ssd_gnn_manager,
                 refresh_counter = 8 # cache color data refresh time
                 ):
 
-    #def __init__(self, NVSHMEM_Cache, Timer, sample_func, g,  device, comm_protocol, reset_counter, num_iterations):
         self.node_distributor = node_distributor
-
+        self.ssd_gnn_manager = ssd_gnn_manager
         self.metadata_reuse_counter = 0
         self.refresh_counter = refresh_counter
         self.cache_color_gathered_header = 0
 
         self.distribute_thread = None
         self.cache_meta_gather_thread = None
+         
+        self.cache_meta_tensor = torch.zeros(self.node_distributor.num_colors, dtype=torch.int32)
 
-    def __call__(self, items):
 
-        # First stage of the Distribution Pipeline
-        if(self.distribute_thread == None):
-            self.distribute_thread = threading.Thread(target=self.node_distributor.parse_domain_training_nodes, args=(self.cache_color_gathered_header,))
-            self.distribute_thread.start()
-            self.cur_iteration += 1
-                
+    def run(self, is_last : bool):
 
-        self.distribute_thread.join()
+        if(self.node_distributor.comm_manager.is_master):
+            # First stage of the Distribution Pipeline
+            if(self.distribute_thread == None):
+                self.distribute_thread = threading.Thread(target=self.node_distributor.parse_domain_training_nodes, args=(self.cache_color_gathered_header,))
+                self.distribute_thread.start()
+                    
+            self.distribute_thread.join()
+
         distributed_node_index = self.node_distributor.parsed_training_nodes_buffer[self.node_distributor.parsed_training_nodes_buffer_header]
+        master_process_id = self.node_distributor.comm_manager.master_process_id
+
+        self.node_distributor.comm_manager.broadcast_training_nodes(distributed_node_index)
         self.node_distributor.parsed_training_nodes_buffer_header = (self.node_distributor.parsed_training_nodes_buffer_header + 1) % 2
 
         if(self.metadata_reuse_counter == self.refresh_counter):
             self.metadata_reuse_counter = 0
 
             if(self.cache_meta_gather_thread != None):
-                self.cache_meta_gather_thread.join()
+              #  self.cache_meta_gather_thread.join()
                 self.node_distributor.cache_color_db_header = int((self.node_distributor.cache_color_db_header + 1) % 2)
 
 
-            #self.NVSHMEM_Cache.get_cache_data(self.cache_meta_tensor.data_ptr())
+            self.ssd_gnn_manager.SSD_GNN_Cache.get_cache_data(self.cache_meta_tensor.data_ptr())
 
             self.cache_color_gathered_header = int((self.node_distributor.cache_color_db_header + 1) % 2)
 
-            self.cache_meta_gather_thread = threading.Thread(target=self.node_distributor.gather_cache_meta, args=(self.cache_meta_tensor,))
-            self.cache_meta_gather_thread.start()
+            # self.cache_meta_gather_thread = threading.Thread(target=self.node_distributor.gather_cache_meta, args=(self.cache_meta_tensor,))
+            # self.cache_meta_gather_thread.start()
 
+            self.cache_meta_gather_thread = 1
+            self.node_distributor.gather_cache_meta
 
-    #     # distribute Node
+        if(self.node_distributor.comm_manager.is_master):
+            if(is_last == False):
+                self.distribute_thread = threading.Thread(target=self.node_distributor.parse_domain_training_nodes, args=(self.cache_color_gathered_header,))
+                self.distribute_thread.start()
 
-   
-        if(self.cur_iteration < self.num_iterations):
-            self.distribute_thread = threading.Thread(target=self.comm_protocol.parse_domain_training_nodes, args=(self.cache_color_gathered_header,))
-            self.distribute_thread.start()
-            self.cur_iteration += 1
+        self.metadata_reuse_counter += 1
+        local_r = self.node_distributor.comm_manager.local_rank 
+        distributed_node_index_per_GPU = distributed_node_index[(local_r * self.node_distributor.batch_size):((local_r+1) * self.node_distributor.batch_size)]
+       # print(f"Rank: {self.node_distributor.comm_manager.local_rank} distributed node idx: {distributed_node_index_per_GPU}")
+        return distributed_node_index_per_GPU
 
-        graph_device = getattr(self.g, 'device', None)   
-
-        rank_idx =  self.comm_protocol.local_gloo_rank
-        idx_list = cur_index[int(rank_idx * self.comm_protocol.batch_size):int((rank_idx+1) * self.comm_protocol.batch_size)]
-        idx_list = idx_list.to(self.device)
-        idx_list = recursive_apply(idx_list, lambda x: x.to(self.device))
-        batch = self.sample_func(self.g, idx_list)
-
-        self.read_counter += 1
-        return batch
-    
-    def clean_up (self):
-        if(self.distribute_thread != None):
-            self.distribute_thread.join()
-
-        self.cur_iteration = 0
 
  
-        num_ssds,
-        num_elems, 
-        ssd_read_offset,
-        cache_size,  # Cache Size in MB
 
 class SSD_INFO(object):
     def __init__(self, 
                 num_ssds,
+                page_size,
                 num_elems,
                 ssd_read_offset):
         self.num_ssds = num_ssds
         self.num_elems = num_elems
         self.ssd_read_offset = ssd_read_offset
+        self.page_size = page_size
 
 
 class SSD_GNN_DataLoader_Iter(object):
@@ -122,8 +118,11 @@ class SSD_GNN_DataLoader(torch.utils.data.DataLoader):
         self.SSD_info = SSD_info
         self.cache_backend = cache_backend
         self.node_distributor = node_distributor
+        self.device = device
 
         self.SSD_GNN_Manager = SSD_GNN_Manager(
+                                    node_distributor = node_distributor,
+                                    page_size = SSD_info.page_size,
                                     num_ssds = SSD_info.num_ssds,
                                     num_elems = SSD_info.num_elems,
                                     ssd_read_offset = SSD_info.ssd_read_offset,
@@ -137,8 +136,14 @@ class SSD_GNN_DataLoader(torch.utils.data.DataLoader):
                                     sim_buf=sim_buf
         )
 
+        self.scheduler = SSD_GNN_Node_Distribution_Scheduler(
+                            node_distributor = self.node_distributor,
+                            ssd_gnn_manager = self.SSD_GNN_Manager,
+                            refresh_counter = 2
+                        )
         self.counter = 0
         self.index_len = len(self.node_distributor.index_tensor)
+        self.total_count = int(self.index_len / self.node_distributor.global_batch_size) - 1
         print(f"Index len: {self.index_len}")
         
     def __iter__(self):
@@ -147,15 +152,29 @@ class SSD_GNN_DataLoader(torch.utils.data.DataLoader):
     # Return Tuple
     # (Input Nodes, seeds, blocks, feature data)
     def __next__(self):
-        if (self.counter >= self.index_len):
+        #if (self.counter >= self.index_len):
+        if (self.counter == self.total_count):
+            self.node_distributor.reset()
+            self.counter = 0
             raise StopIteration  # This tells Python to stop iteration
-        index = self.node_distributor.index_tensor[self.counter:(self.counter+self.batch_size)]
-        batch = self.sampler.sample(self.g, index)
+        is_last_iter = False
+        if(self.counter + self.node_distributor.global_batch_size >= self.index_len):
+            is_last_iter = True
+        
 
-        self.counter += self.batch_size
+        #index = self.node_distributor.index_tensor[self.counter:(self.counter+self.batch_size)]
+        distributed_index = self.scheduler.run(is_last_iter).to(self.device)
+        batch = self.sampler.sample(self.g, distributed_index)
+
+        #self.counter += self.node_distributor.global_batch_size
+        self.counter += 1
 
         return self.SSD_GNN_Manager.fetch_feature(batch)
     
+
+    def print_stats(self):
+        self.SSD_GNN_Manager.print_stats()
+
     def __del__(self):
         del self.SSD_GNN_Manager
         

@@ -18,6 +18,7 @@
 #include "ssd_gnn_cache.cuh"
 #include "node_distributor_pybind.cuh"
 
+
 #define BLOCK_SIZE 256
 namespace py = pybind11;
 
@@ -62,6 +63,7 @@ class SharedUVAManager {
         }
 
         void initialize_shared_memory() {
+            printf("shared memory setting device %i\n", (int) local_rank);
             cudaSetDevice(local_rank);
 
             if(local_rank == 0){
@@ -108,6 +110,8 @@ class SharedUVAManager {
     }
     uintptr_t get_host_ptr() { return reinterpret_cast<uintptr_t>(mmap_ptr); }
     uintptr_t get_device_ptr() { return reinterpret_cast<uintptr_t>(dev_ptr); }
+
+
 };
 
 

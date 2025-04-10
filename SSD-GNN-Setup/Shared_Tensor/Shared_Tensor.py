@@ -35,12 +35,15 @@ class MPI_Comm_Manager(object):
         self.dist_local_rank_list = self.local_comm.allgather(self.global_rank)
         self.is_master = self.local_rank == 0
 
+        print(f"Rank: {self.global_rank} Global Size: {self.global_size}")
+
         #Gather node ids for the master process within the node
         send_id = self.global_rank if self.local_rank == 0 else None
         node_ids = self.global_comm.allgather(send_id)
         self.master_process_list = [nid for nid in node_ids if nid is not None]
         self.num_master_process = len(self.master_process_list)
-        
+#        print(f"Rank: {self.global_rank} master_process_list: {self.master_process_list}")
+
         master_ids = (self.local_comm.allgather(send_id))
         master_id_list= [nid for nid in master_ids if nid is not None]
         assert len(master_id_list) == 1, f"Number of master processes with in node is not 1"
@@ -50,12 +53,47 @@ class MPI_Comm_Manager(object):
     def initialize_nested_process_group(self):
         dist.init_process_group("nccl", world_size=self.global_size, rank=self.global_rank)
         dist.barrier()
-        self.global_gloo = dist.new_group(backend='gloo')
-        dist.barrier(self.global_gloo)
+        # self.global_gloo = dist.new_group(backend='gloo')
+        # dist.barrier(self.global_gloo)
+       # print(f"Rank: {self.global_rank} local_gloo scather: {self.dist_local_rank_list}")
 
-        self.local_gloo_scatter = dist.new_group(ranks=self.dist_local_rank_list, backend='gloo')
-        self.local_gloo_gather = dist.new_group(ranks=self.dist_local_rank_list, backend='gloo')
-        self.master_gloo_gather = dist.new_group(ranks=self.master_process_list, backend='gloo')
+        for master in self.master_process_list:
+            #print(f"Rank: {self.global_rank} master {master}")
+            if(master == self.master_process_id):
+            #    print(f"Rank: {self.global_rank} master {master} local_gloo scather: {self.dist_local_rank_list}")
+                self.local_gloo_scatter = dist.new_group(ranks=self.dist_local_rank_list, backend='gloo')
+            dist.barrier()
+            if(master == self.master_process_id):
+             #   print(f"Rank: {self.global_rank} local_gloo gather: {self.dist_local_rank_list}")
+                self.local_gloo_gather = dist.new_group(ranks=self.dist_local_rank_list, backend='gloo')
+            dist.barrier()
+
+
+       # print(f"Rank: {self.global_rank} mast init start")
+        if(self.is_master):
+            self.master_gloo_gather = dist.new_group(ranks=self.master_process_list, backend='gloo')
+        #print(f"Rank: {self.global_rank} init process group done")
+
+        dist.barrier()
+
+        #   dist.init_process_group("nccl", world_size=self.global_size, rank=self.global_rank)
+        # dist.barrier()
+        # # self.global_gloo = dist.new_group(backend='gloo')
+        # # dist.barrier(self.global_gloo)
+        # print(f"Rank: {self.global_rank} local_gloo scather: {self.dist_local_rank_list}")
+
+        # self.local_gloo_scatter = dist.new_group(ranks=self.dist_local_rank_list, backend='gloo')
+        # dist.barrier()
+        # print(f"Rank: {self.global_rank} local_gloo gather: {self.dist_local_rank_list}")
+        # self.local_gloo_gather = dist.new_group(ranks=self.dist_local_rank_list, backend='gloo')
+        # dist.barrier()
+        # print(f"Rank: {self.global_rank} master_gloo_gather  start gather: {self.master_process_list}")
+
+        # if(self.is_master):
+        #     self.master_gloo_gather = dist.new_group(ranks=self.master_process_list, backend='gloo')
+        # print(f"Rank: {self.global_rank} init process group done")
+
+        # dist.barrier()
 
     def gather_cache_meta(self, gpu_cache_meta, gathered_data):
         dist.all_reduce(gpu_cache_meta, op=dist.ReduceOp.SUM, group=self.local_gloo_gather)
@@ -68,7 +106,10 @@ class MPI_Comm_Manager(object):
 
     def destroy_process_group(self):
         dist.destroy_process_group()
-            
+
+
+class MemoryOwner:
+    pass
 
 class Shared_UVA_Tensor_Manager(object):
     def __init__(self, 
@@ -86,17 +127,34 @@ class Shared_UVA_Tensor_Manager(object):
         self.memory_handle = SharedUVAManager(path, tensor_size, node_id, global_comm_ptr, local_comm_ptr)
         self.tensor_size = tensor_size
         self.device_ptr = self.memory_handle.get_device_ptr()
+        self.host_ptr = self.memory_handle.get_host_ptr()
+
         self.device = "cuda:" + str(comm_manager.local_rank)
+
+    
+        self.owner = MemoryOwner()
 
     def get_tensor(self, 
                    dtype,
+                   device,
                    tensor_shape
                    ):
-
+#        with cp.cuda.Device(self.comm_manager.local_rank):
+        #self.allocated_mem = cp.cuda.UnownedMemory(self.device_ptr, self.tensor_size, device_id = self.comm_manager.local_rank, owner=None)
         self.allocated_mem = cp.cuda.UnownedMemory(self.device_ptr, self.tensor_size, owner=None)
+
         self.memptr = cp.cuda.MemoryPointer(self.allocated_mem, offset=0)
+        # print(f"Mem device_id: {self.memptr.device_id}")
+        # print(f"rank: {self.comm_manager.local_rank} shape: {tensor_shape} tensro size: {self.tensor_size}")
+
         uva_array = cp.ndarray(tensor_shape, dtype=dtype, memptr=self.memptr)
         uva_tensor = torch.as_tensor(uva_array, device=self.device)
+        #uva_tensor = torch.as_tensor(uva_array)
+        #uva_tensor = torch.as_tensor(uva_array)
+       # tensor = _C._from_dlpack(uva_array.toDlpack())  # not public API
+
+        #uva_tensor = torch.utils.dlpack.from_dlpack(uva_array.toDlpack())
+
         return uva_tensor
 
     def write_np_array(self, uva_tensor, np_array):

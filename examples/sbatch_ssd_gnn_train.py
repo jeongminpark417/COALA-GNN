@@ -11,12 +11,12 @@ import numpy as np
 import torch
 from models import *
 import tqdm
-import sys
 
 #import GIDS
 from Shared_Tensor import Shared_UVA_Tensor_Manager
 
 from ssd_gnn_dataloader import IGBDatast_Shared_UVA, IGBDatast_Shared_CSC_UVA, OGBDataset_Shared_UVA, OGBDataset_Shared_CSC_UVA
+import sys
 
 
 import ctypes
@@ -64,8 +64,6 @@ def train( g, args, device, Comm_Manager, dim, page_size, num_classes, feat_shar
     topk_file = meta_path + "topk.npy"
     score_file = meta_path + "score.npy"
 
-
-
     train_nid = torch.nonzero(g.ndata['train_mask'], as_tuple=True)[0].clone()
     test_nid = torch.nonzero(g.ndata['test_mask'], as_tuple=True)[0].clone()
     print(f"train nid len: {(train_nid.shape)}")
@@ -75,8 +73,8 @@ def train( g, args, device, Comm_Manager, dim, page_size, num_classes, feat_shar
                [int(fanout) for fanout in args.fan_out.split(',')]
                )
 
+#    dim = 1024
     cache_size = args.cache_size
-
     fan_out = [int(fanout) for fanout in args.fan_out.split(',')]
 
     SSD_manager = SSD_INFO(num_ssds = 1, 
@@ -106,16 +104,16 @@ def train( g, args, device, Comm_Manager, dim, page_size, num_classes, feat_shar
         model = GCN(dim, args.hidden_channels, num_classes, 
             args.num_layers).to(device)
     if args.model_type == 'sage':
-        model = SAGE(dim, args.hidden_channels, num_classes, 
-            args.num_layers).to(device)
-        # model = DistSAGE(dim, args.hidden_channels, num_classes, args.num_layers, torch.nn.functional.relu
-        #     ).to(device)
+        #model = SAGE(in_feats, args.hidden_channels, args.num_classes, 
+        #    args.num_layers).to(device)
+        model = DistSAGE(dim, args.hidden_channels, num_classes, args.num_layers, torch.nn.functional.relu
+            ).to(device)
     if args.model_type == 'gat':
         model = GAT(dim, args.hidden_channels, num_classes, 
             args.num_layers,  args.num_heads).to(device)
 
-
     model = torch.nn.parallel.DistributedDataParallel(model)
+
 
     loss_fcn = nn.CrossEntropyLoss().to(device)
     optimizer = optim.Adam(
@@ -182,7 +180,7 @@ def train( g, args, device, Comm_Manager, dim, page_size, num_classes, feat_shar
         for step, (input_nodes, seeds, blocks, fetch_feature) in enumerate(test_loader):
             if(count % 100 == 0):
                 print("Eval step: ", count)
-      
+
             blocks = [block.to(device) for block in blocks]
             batch_labels = blocks[-1].dstdata['labels']
             batch_labels = batch_labels.view(-1)
@@ -248,24 +246,23 @@ if __name__ == '__main__':
 
     parser.add_argument('--feat_cpu', action='store_true', help='Store features on CPU')
 
+    local_rank = int(os.environ.get("SLURM_LOCALID", -1))
+    node_rank = int(os.environ.get("SLURM_NODEID", -1))
 
+    print(f"Node {node_rank} | Local Rank {local_rank}")
 
 
     args = parser.parse_args()
     labels = None
 
-    os.environ['MASTER_ADDR'] = 'localhost'
-    os.environ['MASTER_PORT'] = str(15385)
-
-
-    in_feats = args.cache_dim
 
     if not MPI.Is_initialized():
         print("MPI init")
         MPI.Init()
 
-    Comm_Manager = MPI_Comm_Manager()
+    Comm_Manager = MPI_Comm_Manager(node_rank)
     device = 'cuda:' + str(Comm_Manager.local_rank)
+    dim = 0
     print("device: ", device)
     torch.cuda.set_device(device)
 
@@ -296,21 +293,12 @@ if __name__ == '__main__':
 
     
 
-    print(f"RANK = {os.environ.get('RANK')}")
-    print(f"WORLD_SIZE = {os.environ.get('WORLD_SIZE')}")
-    print(f"MASTER_ADDR = {os.environ.get('MASTER_ADDR')}")
-    print(f"MASTER_PORT = {os.environ.get('MASTER_PORT')}")
-
-    os.environ['MASTER_ADDR'] = 'localhost'
-    os.environ['MASTER_PORT'] = '12345'
-
+    
     feat_data = None
     if(args.feat_cpu):
         feat_data = dataset.feat_data
 
-#    feat_data = torch.Tensor([1,2])
     train( g, args, device, Comm_Manager, dim, page_size, num_classes, feat_data)
-
 
     Comm_Manager.destroy_process_group()
     MPI.Finalize()

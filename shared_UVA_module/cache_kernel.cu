@@ -51,7 +51,13 @@ void NVShmem_read_feature_kernel(int gpu_id, Cache_Type *cache, float *out_tenso
     int64_t batch_idx = nvshmem_index_ptr[idx_idx*2 + 1];
     uint64_t tid = threadIdx.x % 32;
     //    get_data(uint64_t id, T* output_ptr, int rank, int dst_gpu){
-
+   // printf("tid: %i row_index:%i\n", (int) idx_idx, (int) row_index);
     cache->get_data(row_index, out_tensor_ptr + (batch_idx) * dim, rank, gpu_id);
   } 
+}
+
+template<typename Cache_Type>
+__global__
+void print_stats_kernel(Cache_Type* cache){
+  cache->print_stats();
 }

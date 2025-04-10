@@ -41,7 +41,9 @@ class NVShmem_Tensor_Manager(object):
 
 class SSD_GNN_Manager(object):
     def __init__(self,
+        node_distributor,
         num_ssds,
+        page_size,
         num_elems, 
         ssd_read_offset,
         cache_size,  # Cache Size in MB
@@ -56,6 +58,7 @@ class SSD_GNN_Manager(object):
 
         sim_buf = None
         ):
+        self.node_distributor = node_distributor
         self.device = device
         self.cache_backend = cache_backend
         self.MPI_comm_manager = MPI_comm_manager
@@ -68,8 +71,8 @@ class SSD_GNN_Manager(object):
 
 
         device_id = MPI_comm_manager.local_rank
-        self.SSD_Controllers = SSD_GNN_SSD_Controllers(num_ssds, num_elems, ssd_read_offset, device_id, dim, self.is_simulation)
-
+        self.SSD_Controllers = SSD_GNN_SSD_Controllers(num_ssds, page_size, num_elems, ssd_read_offset, device_id, dim, self.is_simulation)
+        
         self.max_sample_size = batch_size
         for i in fan_out:
             self.max_sample_size *= (int(i)+1)
@@ -88,9 +91,9 @@ class SSD_GNN_Manager(object):
             self.NVshmem_tensor_manager = NVShmem_Tensor_Manager(nvshmem_ptr, nbytes, nvshmem_index_ptr, index_nbytes, index_shape, self.device)
             # Initializing SSD_GNN Cache
             if(self.is_simulation):
-                self.SSD_GNN_Cache = SSD_GNN_NVSHMEM_Cache(self.SSD_Controllers,  self.MPI_comm_manager.local_size, cache_size, self.sim_buf.data_ptr())
+                self.SSD_GNN_Cache = SSD_GNN_NVSHMEM_Cache(self.SSD_Controllers,  self.node_distributor.distribute_manager, self.MPI_comm_manager.global_rank, self.MPI_comm_manager.local_size, cache_size, self.sim_buf.data_ptr())
             else:
-                self.SSD_GNN_Cache = SSD_GNN_NVSHMEM_Cache(self.SSD_Controllers,  self.MPI_comm_manager.local_size, cache_size, 0)
+                self.SSD_GNN_Cache = SSD_GNN_NVSHMEM_Cache(self.SSD_Controllers,  self.node_distributor.distribute_manager, self.MPI_comm_manager.global_rank, self.MPI_comm_manager.local_size, cache_size, 0)
             print("NVSHMEM Cache mangaer done")
 
         elif (self.cache_backend == "nccl"):
@@ -120,8 +123,13 @@ class SSD_GNN_Manager(object):
             print("Unsupported cache backend for fetch_feature")
             return
 
-
+    def get_cache_data(self, ptr):
+        self.SSD_GNN_Cache.get_cache_data(ptr)
         
+
+    def print_stats(self):
+        self.SSD_GNN_Cache.print_stats()
+
     # def __del__(self):
     #     if(self.cache_backend == "nvshmem"):
     #         self.nvshmem_manager.free(NVshmem_tensor_manager.nvshmem_batch_ptr)

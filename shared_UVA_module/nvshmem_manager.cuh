@@ -17,14 +17,14 @@ class NVSHMEM_Manager {
 
         cuda_err_chk(cudaSetDevice(local_rank));
         
-        MPI_Comm mpi_comm = MPI_COMM_WORLD;
+        //MPI_Comm mpi_comm = MPI_COMM_WORLD;
         
         nvshmemx_init_attr_t attr;
-        //attr.mpi_comm = l_comm_ptr;
-        attr.mpi_comm = &mpi_comm;
+        attr.mpi_comm = l_comm_ptr;
+        //attr.mpi_comm = &mpi_comm;
 
         //nvshmem_init();
-        printf("nvshmem init start2\n");
+        printf("nvshmem init start\n");
         nvshmemx_init_attr(NVSHMEMX_INIT_WITH_MPI_COMM, &attr);
         printf("nvshmem init done\n");
 
