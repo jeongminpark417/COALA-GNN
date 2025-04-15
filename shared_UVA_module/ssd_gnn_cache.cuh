@@ -190,6 +190,7 @@ class SSD_GNN_NVSHMEM_Cache {
         }
 
         ~SSD_GNN_NVSHMEM_Cache(){
+            cudaFree(d_request_counters);
             delete cache_handle;
         }
                                     

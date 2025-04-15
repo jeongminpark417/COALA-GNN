@@ -104,13 +104,13 @@ class GCN(nn.Module):
 #     def __init__(self, in_feats, h_feats, num_classes, num_heads, num_layers=2, dropout=0.2):
 #         super(GAT, self).__init__()
 #         self.layers = nn.ModuleList()
-#         self.layers.append(GATConv(in_feats, h_feats, num_heads))
+#         self.layers.append(GATConv(in_feats, h_feats, num_heads, allow_zero_in_degree=True))
 #         for _ in range(num_layers-2):
-#             self.layers.append(GATConv(h_feats * num_heads, h_feats, num_heads))
-#         self.layers.append(GATConv(h_feats * num_heads, num_classes, num_heads))
+#             self.layers.append(GATConv(h_feats * num_heads, h_feats, num_heads, allow_zero_in_degree=True))
+#         self.layers.append(GATConv(h_feats * num_heads, num_classes, num_heads, allow_zero_in_degree=True))
 #         self.dropout = nn.Dropout(dropout)
 
-#    def forward(self, blocks, x):
+#     def forward(self, blocks, x):
 #        h = x
 #        for l, (layer, block) in enumerate(zip(self.layers, blocks)):
 #            h_dst = h[:block.num_dst_nodes()]
@@ -121,6 +121,7 @@ class GCN(nn.Module):
 #            else:
 #                h = layer(block, (h, h_dst)).mean(1)  
 #        return h
+
 
 class GAT(nn.Module):
     def __init__(
@@ -135,7 +136,8 @@ class GAT(nn.Module):
             dglnn.GATConv(
                 (in_feats, in_feats),
                 n_hidden,
-                num_heads=num_heads
+                num_heads=num_heads,
+                allow_zero_in_degree=True
             )
         )
         for i in range(1, n_layers - 1):
@@ -143,7 +145,8 @@ class GAT(nn.Module):
                 dglnn.GATConv(
                     (n_hidden * num_heads, n_hidden * num_heads),
                     n_hidden,
-                    num_heads=num_heads
+                    num_heads=num_heads,
+                    allow_zero_in_degree=True
                 )
             )
         self.layers.append(
@@ -152,6 +155,7 @@ class GAT(nn.Module):
                 n_classes,
                 num_heads=num_heads,
                 activation=None,
+                allow_zero_in_degree=True
             )
         )
 
@@ -170,8 +174,8 @@ class GAT(nn.Module):
             else:
                 h = layer(block, (h, h_dst))
         h = h.mean(1)
+        #return h
         return h.log_softmax(dim=-1)
-
 
 
 class RGCN(nn.Module):

@@ -41,8 +41,10 @@ class NVSHMEM_Manager {
     }
     
     void free(uint64_t dest_ptr) {
+
         void* destination = (void*) dest_ptr;
         if (destination) {
+            printf("NVSHMEM Free :%p", destination);
             nvshmem_free(destination);
 
             destination = nullptr;

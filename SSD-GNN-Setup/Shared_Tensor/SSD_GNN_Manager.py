@@ -130,10 +130,10 @@ class SSD_GNN_Manager(object):
     def print_stats(self):
         self.SSD_GNN_Cache.print_stats()
 
-    # def __del__(self):
-    #     if(self.cache_backend == "nvshmem"):
-    #         self.nvshmem_manager.free(NVshmem_tensor_manager.nvshmem_batch_ptr)
-    #         self.nvshmem_manager.free(NVshmem_tensor_manager.nvshmem_index_ptr)
-    #         self.nvshmem_manager.finalize()
+    def __del__(self):
+        if(self.cache_backend == "nvshmem"):
+            self.nvshmem_manager.free(self.NVshmem_tensor_manager.nvshmem_batch_ptr)
+            self.nvshmem_manager.free(self.NVshmem_tensor_manager.nvshmem_index_ptr)
+            self.nvshmem_manager.finalize()
 
 

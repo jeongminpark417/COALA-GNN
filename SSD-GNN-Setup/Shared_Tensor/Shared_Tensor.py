@@ -44,11 +44,20 @@ class MPI_Comm_Manager(object):
         self.num_master_process = len(self.master_process_list)
 #        print(f"Rank: {self.global_rank} master_process_list: {self.master_process_list}")
 
+        send_list = self.dist_local_rank_list if  self.local_rank == 0 else None
+        recv_dist_local_rank_list = self.global_comm.allgather(send_list)
+        print(f"Rank: {self.global_rank} recv_dist_local_rank_list: {recv_dist_local_rank_list}")
+        self.global_dist_local_rank_list = [sublist for sublist in recv_dist_local_rank_list if sublist is not None]
+        print(f"Rank: {self.global_rank} global_dist_local_rank_list: {self.global_dist_local_rank_list}")
+
         master_ids = (self.local_comm.allgather(send_id))
         master_id_list= [nid for nid in master_ids if nid is not None]
         assert len(master_id_list) == 1, f"Number of master processes with in node is not 1"
         self.master_process_id = master_id_list[0]
+        self.master_process_index = self.master_process_list.index(self.master_process_id)
 
+        self.local_gloo_scatter_array = []
+        self.local_gloo_gather_array = []
 
     def initialize_nested_process_group(self):
         dist.init_process_group("nccl", world_size=self.global_size, rank=self.global_rank)
@@ -57,22 +66,39 @@ class MPI_Comm_Manager(object):
         # dist.barrier(self.global_gloo)
        # print(f"Rank: {self.global_rank} local_gloo scather: {self.dist_local_rank_list}")
 
+        # for master in self.master_process_list:
+        #     #print(f"Rank: {self.global_rank} master {master}")
+        #     if(master == self.master_process_id):
+        #         print(f"Rank: {self.global_rank} master {master} local_gloo scather: {self.dist_local_rank_list}")
+        #         self.local_gloo_scatter = dist.new_group(ranks=self.dist_local_rank_list, backend='gloo')
+        #         dist.barrier(self.local_gloo_scatter)
+        #     dist.barrier()
+        #     if(master == self.master_process_id):
+        #         print(f"Rank: {self.global_rank} local_gloo gather: {self.dist_local_rank_list}")
+        #         self.local_gloo_gather = dist.new_group(ranks=self.dist_local_rank_list, backend='gloo')
+        #         dist.barrier(self.local_gloo_gather)
+        #     dist.barrier()
+        counter = 0
         for master in self.master_process_list:
-            #print(f"Rank: {self.global_rank} master {master}")
-            if(master == self.master_process_id):
-            #    print(f"Rank: {self.global_rank} master {master} local_gloo scather: {self.dist_local_rank_list}")
-                self.local_gloo_scatter = dist.new_group(ranks=self.dist_local_rank_list, backend='gloo')
+            print(f"Rank: {self.global_rank} master {master} local_gloo scather: {self.global_dist_local_rank_list[counter]}")
+            self.local_gloo_scatter_array.append(dist.new_group(ranks=self.global_dist_local_rank_list[counter], backend='gloo'))
+            dist.barrier(self.local_gloo_scatter_array[counter])
             dist.barrier()
-            if(master == self.master_process_id):
-             #   print(f"Rank: {self.global_rank} local_gloo gather: {self.dist_local_rank_list}")
-                self.local_gloo_gather = dist.new_group(ranks=self.dist_local_rank_list, backend='gloo')
+            print(f"Rank: {self.global_rank} local_gloo gather: {self.global_dist_local_rank_list[counter]}")
+            self.local_gloo_gather_array.append(dist.new_group(ranks=self.global_dist_local_rank_list[counter], backend='gloo'))
+            dist.barrier(self.local_gloo_gather_array[counter])
             dist.barrier()
+            counter += 1
+
+        self.local_gloo_gather = self.local_gloo_gather_array[self.master_process_index]
+        self.local_gloo_scatter = self.local_gloo_scatter_array[self.master_process_index]
 
 
-       # print(f"Rank: {self.global_rank} mast init start")
-        if(self.is_master):
-            self.master_gloo_gather = dist.new_group(ranks=self.master_process_list, backend='gloo')
-        #print(f"Rank: {self.global_rank} init process group done")
+        print(f"Rank: {self.global_rank} mast init start")
+        #if(self.is_master):
+        self.master_gloo_gather = dist.new_group(ranks=self.master_process_list, backend='gloo')
+        dist.barrier(self.master_gloo_gather)
+        print(f"Rank: {self.global_rank} init process group done")
 
         dist.barrier()
 
@@ -105,6 +131,12 @@ class MPI_Comm_Manager(object):
         dist.broadcast(parsed_training_node_list, src=self.master_process_id, group=self.local_gloo_scatter)
 
     def destroy_process_group(self):
+        dist.barrier()
+        for group in self.local_gloo_scatter_array:
+            dist.destroy_process_group(group)
+        for group in self.local_gloo_gather_array:
+            dist.destroy_process_group(group)
+        dist.destroy_process_group(self.master_gloo_gather)
         dist.destroy_process_group()
 
 

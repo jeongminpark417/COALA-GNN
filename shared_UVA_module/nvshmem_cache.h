@@ -325,7 +325,7 @@ struct NVSHMEM_cache_d_t {
     __device__
     void read_page_simulation(uint64_t pg_id, void* dst, uint32_t mask){
         //return;
-        __nanosleep(1000*10);
+       // __nanosleep(1000*10);
         void* src = sim_buf + (pg_id) * CL_SIZE;
         warp_memcpy<float>(src, dst, CL_SIZE, mask);
         return;

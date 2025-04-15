@@ -31,6 +31,9 @@ class SSD_GNN_Node_Distribution_Scheduler(object):
             if(self.distribute_thread == None):
                 self.distribute_thread = threading.Thread(target=self.node_distributor.parse_domain_training_nodes, args=(self.cache_color_gathered_header,))
                 self.distribute_thread.start()
+
+                # self.node_distributor.parse_domain_training_nodes(self.cache_color_gathered_header)
+                # self.distribute_thread =  1
                     
             self.distribute_thread.join()
 
@@ -44,7 +47,7 @@ class SSD_GNN_Node_Distribution_Scheduler(object):
             self.metadata_reuse_counter = 0
 
             if(self.cache_meta_gather_thread != None):
-              #  self.cache_meta_gather_thread.join()
+                self.cache_meta_gather_thread.join()
                 self.node_distributor.cache_color_db_header = int((self.node_distributor.cache_color_db_header + 1) % 2)
 
 
@@ -52,16 +55,18 @@ class SSD_GNN_Node_Distribution_Scheduler(object):
 
             self.cache_color_gathered_header = int((self.node_distributor.cache_color_db_header + 1) % 2)
 
-            # self.cache_meta_gather_thread = threading.Thread(target=self.node_distributor.gather_cache_meta, args=(self.cache_meta_tensor,))
-            # self.cache_meta_gather_thread.start()
+            self.cache_meta_gather_thread = threading.Thread(target=self.node_distributor.gather_cache_meta, args=(self.cache_meta_tensor,))
+            self.cache_meta_gather_thread.start()
 
-            self.cache_meta_gather_thread = 1
-            self.node_distributor.gather_cache_meta
+            # self.cache_meta_gather_thread = 1
+            # self.node_distributor.gather_cache_meta(self.cache_meta_tensor)
 
         if(self.node_distributor.comm_manager.is_master):
             if(is_last == False):
                 self.distribute_thread = threading.Thread(target=self.node_distributor.parse_domain_training_nodes, args=(self.cache_color_gathered_header,))
                 self.distribute_thread.start()
+                #self.node_distributor.parse_domain_training_nodes(self.cache_color_gathered_header)
+
 
         self.metadata_reuse_counter += 1
         local_r = self.node_distributor.comm_manager.local_rank 
@@ -139,7 +144,7 @@ class SSD_GNN_DataLoader(torch.utils.data.DataLoader):
         self.scheduler = SSD_GNN_Node_Distribution_Scheduler(
                             node_distributor = self.node_distributor,
                             ssd_gnn_manager = self.SSD_GNN_Manager,
-                            refresh_counter = 2
+                            refresh_counter = 8
                         )
         self.counter = 0
         self.index_len = len(self.node_distributor.index_tensor)

@@ -154,6 +154,9 @@ def train( g, args, device, Comm_Manager, dim, page_size, num_classes, feat_shar
         print(f"Number of sampled nodes : {num_sampled_nodes}")
         train_loader.print_stats()
 
+    Comm_Manager.global_comm.Barrier()
+    del train_loader
+    
     Test_Node_Distributor_Manager = Node_Distributor(Comm_Manager, test_nid, args.batch_size, color_file, topk_file, score_file)
     test_loader = SSD_GNN_DataLoader(
                     SSD_manager,
@@ -191,7 +194,9 @@ def train( g, args, device, Comm_Manager, dim, page_size, num_classes, feat_shar
         labels = np.concatenate(labels)
         test_acc = sklearn.metrics.accuracy_score(labels, predictions)*100
     print("Test Acc {:.2f}%".format(test_acc))
-
+    Comm_Manager.global_comm.Barrier()
+    del test_loader
+    print("GNN Training done")
 
             
 
@@ -299,7 +304,8 @@ if __name__ == '__main__':
         feat_data = dataset.feat_data
 
     train( g, args, device, Comm_Manager, dim, page_size, num_classes, feat_data)
-
+    print("destroying process group")
     Comm_Manager.destroy_process_group()
+    Comm_Manager.global_comm.Barrier()
     MPI.Finalize()
-
+    print("MPI Finialized")
