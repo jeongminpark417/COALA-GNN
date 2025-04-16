@@ -5,13 +5,13 @@ if sys.version_info < (3,0):
   sys.exit('Sorry, Python < 3.0 is not supported')
 
 setup(
-  name        = 'SSD_GNN_Pybind11',
-  version     = '${PACKAGE_VERSION}', # TODO: might want to use commit ID here
-  packages    = [ 'SSD_GNN_Pybind' ],
+  name        = 'COALA_GNN_Pybind11',
+  version     = '1.0.0', # TODO: might want to use commit ID here
+  packages    = [ 'COALA_GNN_Pybind' ],
   package_dir = {
     '': '${CMAKE_CURRENT_BINARY_DIR}'
   },
   package_data = {
-    '': ['SSD_GNN_Pybind.so']
+    '': ['COALA_GNN_Pybind.so']
   }
 )

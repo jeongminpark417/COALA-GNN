@@ -22,7 +22,7 @@
 namespace py = pybind11;
 
 
-PYBIND11_MODULE(SSD_GNN_Pybind, m) {
+PYBIND11_MODULE(COALA_GNN_Pybind, m) {
     py::class_<SharedUVAManager>(m, "SharedUVAManager")
         .def(py::init<const std::string&, int64_t, int, int64_t, int64_t>())
         .def("get_host_ptr", &SharedUVAManager::get_host_ptr)

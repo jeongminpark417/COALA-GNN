@@ -1,4 +1,4 @@
-from SSD_GNN_Pybind import NVSHMEM_Manager, SSD_GNN_SSD_Controllers, SSD_GNN_NVSHMEM_Cache
+from COALA_GNN_Pybind import NVSHMEM_Manager, SSD_GNN_SSD_Controllers, SSD_GNN_NVSHMEM_Cache
 from mpi4py import MPI
 import cupy as cp
 import torch
@@ -39,7 +39,7 @@ class NVShmem_Tensor_Manager(object):
         
 
 
-class SSD_GNN_Manager(object):
+class COALA_GNN_Manager(object):
     def __init__(self,
         node_distributor,
         num_ssds,
@@ -89,11 +89,11 @@ class SSD_GNN_Manager(object):
             index_shape = [self.MPI_comm_manager.local_size, int(self.max_sample_size * 2)]
 
             self.NVshmem_tensor_manager = NVShmem_Tensor_Manager(nvshmem_ptr, nbytes, nvshmem_index_ptr, index_nbytes, index_shape, self.device)
-            # Initializing SSD_GNN Cache
+            # Initializing COALA_GNN Cache
             if(self.is_simulation):
-                self.SSD_GNN_Cache = SSD_GNN_NVSHMEM_Cache(self.SSD_Controllers,  self.node_distributor.distribute_manager, self.MPI_comm_manager.global_rank, self.MPI_comm_manager.local_size, cache_size, self.sim_buf.data_ptr())
+                self.COALA_GNN_Cache = SSD_GNN_NVSHMEM_Cache(self.SSD_Controllers,  self.node_distributor.distribute_manager, self.MPI_comm_manager.global_rank, self.MPI_comm_manager.local_size, cache_size, self.sim_buf.data_ptr())
             else:
-                self.SSD_GNN_Cache = SSD_GNN_NVSHMEM_Cache(self.SSD_Controllers,  self.node_distributor.distribute_manager, self.MPI_comm_manager.global_rank, self.MPI_comm_manager.local_size, cache_size, 0)
+                self.COALA_GNN_Cache = SSD_GNN_NVSHMEM_Cache(self.SSD_Controllers,  self.node_distributor.distribute_manager, self.MPI_comm_manager.global_rank, self.MPI_comm_manager.local_size, cache_size, 0)
             print("NVSHMEM Cache mangaer done")
 
         elif (self.cache_backend == "nccl"):
@@ -115,8 +115,8 @@ class SSD_GNN_Manager(object):
             return_torch_ptr = self.NVshmem_tensor_manager.get_batch_tensor_ptr()
             request_tensor_ptr = self.NVshmem_tensor_manager.get_index_tensor_ptr()
 
-            self.SSD_GNN_Cache.send_requests(index_ptr, index_size, request_tensor_ptr, self.max_sample_size)
-            self.SSD_GNN_Cache.read_feature(return_torch_ptr, request_tensor_ptr, self.max_sample_size)
+            self.COALA_GNN_Cache.send_requests(index_ptr, index_size, request_tensor_ptr, self.max_sample_size)
+            self.COALA_GNN_Cache.read_feature(return_torch_ptr, request_tensor_ptr, self.max_sample_size)
 
             return (*batch, return_torch)
         else:
@@ -124,11 +124,11 @@ class SSD_GNN_Manager(object):
             return
 
     def get_cache_data(self, ptr):
-        self.SSD_GNN_Cache.get_cache_data(ptr)
+        self.COALA_GNN_Cache.get_cache_data(ptr)
         
 
     def print_stats(self):
-        self.SSD_GNN_Cache.print_stats()
+        self.COALA_GNN_Cache.print_stats()
 
     def __del__(self):
         if(self.cache_backend == "nvshmem"):

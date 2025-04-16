@@ -39,16 +39,16 @@ link_libraries(  ${CMAKE_CURRENT_SOURCE_DIR}/../bam/build/lib/libnvm.so pybind11
 # link_libraries(  ${CMAKE_CURRENT_SOURCE_DIR}/../bam/build/lib/libnvm.so pybind11::module MPI::MPI_CXX cuda  ${NVSHMEM_HOME} /usr/lib/x86_64-linux-gnu/openmpi/lib/libmpi.so)
 
 
-add_library(SSD_GNN_Pybind MODULE SSD_GNN_Pybind.cu)
+add_library(COALA_GNN_Pybind MODULE COALA_GNN_Pybind.cu)
 
-set_target_properties(SSD_GNN_Pybind PROPERTIES
+set_target_properties(COALA_GNN_Pybind PROPERTIES
     CUDA_SEPARABLE_COMPILATION ON
     POSITION_INDEPENDENT_CODE ON
     PREFIX ""
-    LIBRARY_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/SSD_GNN_Pybind"
+    LIBRARY_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/COALA_GNN_Pybind"
 )
 
-target_compile_options(SSD_GNN_Pybind PRIVATE
+target_compile_options(COALA_GNN_Pybind PRIVATE
     $<$<COMPILE_LANGUAGE:CUDA>:
     -std=c++17;
     -rdc=true;
@@ -60,15 +60,14 @@ target_compile_options(SSD_GNN_Pybind PRIVATE
   >
 )
 
-#target_link_libraries(SSD_GNN_Pybind PRIVATE   cuda cudart pybind11::module)
-target_link_libraries(SSD_GNN_Pybind PRIVATE  ${NVSHMEM_HOST_LIB} ${NVSHMEM_DEVICE_LIB}  cuda cudart pybind11::module)
+target_link_libraries(COALA_GNN_Pybind PRIVATE  ${NVSHMEM_HOST_LIB} ${NVSHMEM_DEVICE_LIB}  cuda cudart pybind11::module)
 
 
-CONFIGURE_FILE( SSD_GNN_Pybind/__init__.py
-${CMAKE_CURRENT_BINARY_DIR}/SSD_GNN_Pybind/__init__.py
+CONFIGURE_FILE( COALA_GNN_Pybind/__init__.py
+	${CMAKE_CURRENT_BINARY_DIR}/COALA_GNN_Pybind/__init__.py
 )
 
 # Ditto for the setup file.
-CONFIGURE_FILE( SSD_GNN_Pybind/setup.py
-${CMAKE_CURRENT_BINARY_DIR}/SSD_GNN_Pybind/setup.py
+CONFIGURE_FILE( COALA_GNN_Pybind/setup.py
+	${CMAKE_CURRENT_BINARY_DIR}/COALA_GNN_Pybind/setup.py
 )

@@ -1,11 +1,11 @@
-from .SSD_GNN_Manager import SSD_GNN_Manager
+from .COALA_GNN_Manager import COALA_GNN_Manager
 import torch
 import os
 import threading
 import torch.distributed as dist
 
 #CHECK THIS CLASS
-class SSD_GNN_Node_Distribution_Scheduler(object):
+class COALA_GNN_Node_Distribution_Scheduler(object):
     def __init__(self, 
                 node_distributor, # Node_Distributor
                 ssd_gnn_manager,
@@ -51,7 +51,7 @@ class SSD_GNN_Node_Distribution_Scheduler(object):
                 self.node_distributor.cache_color_db_header = int((self.node_distributor.cache_color_db_header + 1) % 2)
 
 
-            self.ssd_gnn_manager.SSD_GNN_Cache.get_cache_data(self.cache_meta_tensor.data_ptr())
+            self.ssd_gnn_manager.COALA_GNN_Cache.get_cache_data(self.cache_meta_tensor.data_ptr())
 
             self.cache_color_gathered_header = int((self.node_distributor.cache_color_db_header + 1) % 2)
 
@@ -89,19 +89,7 @@ class SSD_INFO(object):
         self.page_size = page_size
 
 
-class SSD_GNN_DataLoader_Iter(object):
-    def __init__(self, dataloader, dataloader_iter):
-        self.dataloader = dataloader
-        self.dataloader_iter = dataloader_iter
-        self.graph_sampler = self.dataloader.graph_sampler
-
-    def __iter__(self):
-        return self
-    
-#    def __next__(self):
-
-
-class SSD_GNN_DataLoader(torch.utils.data.DataLoader):
+class COALA_GNN_DataLoader(torch.utils.data.DataLoader):
     def __init__(self,
                  SSD_info, #SSD_INFO CLASS
                  node_distributor, # Node_Distributor
@@ -125,7 +113,7 @@ class SSD_GNN_DataLoader(torch.utils.data.DataLoader):
         self.node_distributor = node_distributor
         self.device = device
 
-        self.SSD_GNN_Manager = SSD_GNN_Manager(
+        self.COALA_GNN_Manager = COALA_GNN_Manager(
                                     node_distributor = node_distributor,
                                     page_size = SSD_info.page_size,
                                     num_ssds = SSD_info.num_ssds,
@@ -141,9 +129,9 @@ class SSD_GNN_DataLoader(torch.utils.data.DataLoader):
                                     sim_buf=sim_buf
         )
 
-        self.scheduler = SSD_GNN_Node_Distribution_Scheduler(
+        self.scheduler = COALA_GNN_Node_Distribution_Scheduler(
                             node_distributor = self.node_distributor,
-                            ssd_gnn_manager = self.SSD_GNN_Manager,
+                            ssd_gnn_manager = self.COALA_GNN_Manager,
                             refresh_counter = 8
                         )
         self.counter = 0
@@ -174,12 +162,12 @@ class SSD_GNN_DataLoader(torch.utils.data.DataLoader):
         #self.counter += self.node_distributor.global_batch_size
         self.counter += 1
 
-        return self.SSD_GNN_Manager.fetch_feature(batch)
+        return self.COALA_GNN_Manager.fetch_feature(batch)
     
 
     def print_stats(self):
-        self.SSD_GNN_Manager.print_stats()
+        self.COALA_GNN_Manager.print_stats()
 
     def __del__(self):
-        del self.SSD_GNN_Manager
+        del self.COALA_GNN_Manager
         
