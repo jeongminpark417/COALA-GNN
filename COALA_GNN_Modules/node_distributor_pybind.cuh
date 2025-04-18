@@ -47,7 +47,7 @@ void  parse_numpy_file(const std::string &color_file, int dim, char*& ret_buffer
 
   uint8_t major_version = buffer_ptr[6];
   uint8_t minor_version = buffer_ptr[7];
-  std::cout << "Version: " << static_cast<int>(major_version) << "." << static_cast<int>(minor_version) << std::endl;
+ // std::cout << "Version: " << static_cast<int>(major_version) << "." << static_cast<int>(minor_version) << std::endl;
   buffer_ptr += 8; // Move past the magic string and version bytes
 
   // Step 3: Read the header length based on the version
@@ -99,7 +99,6 @@ void  parse_numpy_file(const std::string &color_file, int dim, char*& ret_buffer
 
   if (std::regex_search(header, match, dtype_regex)) {
       auto dtype= match[1].str();
-      std::cout << "dtype: " << dtype << std::endl;
       assert((dtype == "<i8" || dtype == "<f8") && "The dtype is not '<i8'. This program only supports 64-bit integers.");
   }
 

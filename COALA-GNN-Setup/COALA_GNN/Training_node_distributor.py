@@ -1,4 +1,4 @@
-from SSD_GNN_Pybind import Node_distributor_pybind
+from COALA_GNN_Pybind import Node_distributor_pybind
 import torch
 import torch.distributed as dist
 

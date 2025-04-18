@@ -16,17 +16,14 @@ class NVSHMEM_Manager {
         auto l_comm_ptr = (MPI_Comm*)(local_comm_ptr);
 
         cuda_err_chk(cudaSetDevice(local_rank));
-        
-        //MPI_Comm mpi_comm = MPI_COMM_WORLD;
-        
         nvshmemx_init_attr_t attr;
         attr.mpi_comm = l_comm_ptr;
         //attr.mpi_comm = &mpi_comm;
 
         //nvshmem_init();
-        printf("nvshmem init start\n");
+        //printf("nvshmem init start\n");
         nvshmemx_init_attr(NVSHMEMX_INIT_WITH_MPI_COMM, &attr);
-        printf("nvshmem init done\n");
+        //printf("nvshmem init done\n");
 
     }
 
@@ -44,7 +41,7 @@ class NVSHMEM_Manager {
 
         void* destination = (void*) dest_ptr;
         if (destination) {
-            printf("NVSHMEM Free :%p", destination);
+           // printf("NVSHMEM Free :%p", destination);
             nvshmem_free(destination);
 
             destination = nullptr;

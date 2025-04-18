@@ -63,7 +63,7 @@ class SharedUVAManager {
         }
 
         void initialize_shared_memory() {
-            printf("shared memory setting device %i\n", (int) local_rank);
+          //  printf("shared memory setting device %i\n", (int) local_rank);
             cudaSetDevice(local_rank);
 
             if(local_rank == 0){

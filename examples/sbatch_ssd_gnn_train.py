@@ -12,8 +12,7 @@ import torch
 from models import *
 import tqdm
 
-#import GIDS
-from Shared_Tensor import Shared_UVA_Tensor_Manager
+from COALA_GNN import Shared_UVA_Tensor_Manager
 
 from ssd_gnn_dataloader import IGBDatast_Shared_UVA, IGBDatast_Shared_CSC_UVA, OGBDataset_Shared_UVA, OGBDataset_Shared_CSC_UVA
 import sys
@@ -24,8 +23,8 @@ import mpi4py
 from mpi4py import MPI
 import torch.distributed as dist
 
-from Shared_Tensor import Shared_UVA_Tensor_Manager, MPI_Comm_Manager, Node_Distributor
-from Shared_Tensor import SSD_INFO, SSD_GNN_DataLoader
+from COALA_GNN import Shared_UVA_Tensor_Manager, MPI_Comm_Manager, Node_Distributor
+from COALA_GNN import SSD_INFO, COALA_GNN_DataLoader
 
 
 
@@ -49,10 +48,6 @@ def read_graph_file(filename):
 
 
 def train( g, args, device, Comm_Manager, dim, page_size, num_classes, feat_shared_uva = None):
-    if(feat_shared_uva != None):
-        print("SSD_GNN simulation train")
-    else:
-        print("SSD_GNN real SSD train")
 
     if(args.data == 'IGB'):
         meta_path = args.path + str(args.dataset_size) + "/"
@@ -66,14 +61,12 @@ def train( g, args, device, Comm_Manager, dim, page_size, num_classes, feat_shar
 
     train_nid = torch.nonzero(g.ndata['train_mask'], as_tuple=True)[0].clone()
     test_nid = torch.nonzero(g.ndata['test_mask'], as_tuple=True)[0].clone()
-    print(f"train nid len: {(train_nid.shape)}")
     Node_Distributor_Manager = Node_Distributor(Comm_Manager, train_nid, args.batch_size, color_file, topk_file, score_file)
 
     sampler = dgl.dataloading.MultiLayerNeighborSampler(
                [int(fanout) for fanout in args.fan_out.split(',')]
                )
 
-#    dim = 1024
     cache_size = args.cache_size
     fan_out = [int(fanout) for fanout in args.fan_out.split(',')]
 
@@ -82,7 +75,7 @@ def train( g, args, device, Comm_Manager, dim, page_size, num_classes, feat_shar
                            num_elems = 1024, 
                            ssd_read_offset = 0)
 
-    train_loader = SSD_GNN_DataLoader(
+    train_loader = COALA_GNN_DataLoader(
                         SSD_manager,
                         Node_Distributor_Manager, 
                         g,
@@ -98,7 +91,6 @@ def train( g, args, device, Comm_Manager, dim, page_size, num_classes, feat_shar
 
 
 
-    print("train dataloader init done")
 
     if args.model_type == 'gcn':
         model = GCN(dim, args.hidden_channels, num_classes, 
@@ -125,7 +117,6 @@ def train( g, args, device, Comm_Manager, dim, page_size, num_classes, feat_shar
     #for step, (blocks) in enumerate(train_loader):
     count = 0
     num_sampled_nodes = 0
-    print("Training start")
     model.train()
     for epoch in range(args.epochs):
         print(f"Epoch: {epoch}")
@@ -158,7 +149,7 @@ def train( g, args, device, Comm_Manager, dim, page_size, num_classes, feat_shar
     del train_loader
     
     Test_Node_Distributor_Manager = Node_Distributor(Comm_Manager, test_nid, args.batch_size, color_file, topk_file, score_file)
-    test_loader = SSD_GNN_DataLoader(
+    test_loader = COALA_GNN_DataLoader(
                     SSD_manager,
                     Test_Node_Distributor_Manager, 
                     g,
@@ -196,8 +187,7 @@ def train( g, args, device, Comm_Manager, dim, page_size, num_classes, feat_shar
     print("Test Acc {:.2f}%".format(test_acc))
     Comm_Manager.global_comm.Barrier()
     del test_loader
-    print("GNN Training done")
-
+    
             
 
 
@@ -262,37 +252,35 @@ if __name__ == '__main__':
 
 
     if not MPI.Is_initialized():
-        print("MPI init")
         MPI.Init()
 
     Comm_Manager = MPI_Comm_Manager(node_rank)
     device = 'cuda:' + str(Comm_Manager.local_rank)
     dim = 0
-    print("device: ", device)
     torch.cuda.set_device(device)
 
     Comm_Manager.initialize_nested_process_group()
 
 
     if(args.data == 'IGB'):
-        print("Dataset: IGB")
+        if(Comm_Manager.global_rank == 0):
+            print("Dataset: IGB")
         dataset = IGBDatast_Shared_CSC_UVA(args, Comm_Manager, device)        
         g = dataset[0]
         dim = 1024
         page_size = 4096
         num_classes = args.num_classes
     elif(args.data == 'OGB'):
-        print("Dataset: OGB")
+        if(Comm_Manager.global_rank == 0):
+            print("Dataset: OGB")
         dataset = OGBDataset_Shared_CSC_UVA(args, Comm_Manager, device)        
         g = dataset[0]
         dim = 128
         page_size = 512
         num_classes = 172
     else:
-        print("Unsupported Dataset")
-        # dataset = OGBDGLDataset(args)
-        # g = dataset[0]
-        # g  = g.formats('csc')
+        if(Comm_Manager.global_rank == 0):
+            print("Unsupported Dataset")
         sys.exit(1)
     g.ndata['labels'] = g.ndata['label']
 
@@ -303,9 +291,12 @@ if __name__ == '__main__':
     if(args.feat_cpu):
         feat_data = dataset.feat_data
 
+    if(Comm_Manager.global_rank == 0):
+        print("Train start")
     train( g, args, device, Comm_Manager, dim, page_size, num_classes, feat_data)
-    print("destroying process group")
+    Comm_Manager.global_comm.Barrier()
     Comm_Manager.destroy_process_group()
     Comm_Manager.global_comm.Barrier()
     MPI.Finalize()
-    print("MPI Finialized")
+    if(local_rank == 0):
+        print("MPI Finialized")

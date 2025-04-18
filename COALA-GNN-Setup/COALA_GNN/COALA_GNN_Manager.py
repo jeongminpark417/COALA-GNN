@@ -6,7 +6,7 @@ import torch
 class NVShmem_Tensor_Manager(object):
     def __init__(self, nvshmem_batch_ptr: int, batch_nbytes: int, nvshmem_index_ptr: int, 
                 index_nbytes: int, shape: tuple, device: str):
-        print(f"NVSHMEM batch: {batch_nbytes} index: {index_nbytes}")
+        #print(f"NVSHMEM batch: {batch_nbytes} index: {index_nbytes}")
         self.nvshmem_batch_ptr = nvshmem_batch_ptr
         self.batch_nbytes = batch_nbytes
         self.batch_mem = cp.cuda.UnownedMemory(nvshmem_batch_ptr, batch_nbytes, owner=None)
@@ -94,7 +94,6 @@ class COALA_GNN_Manager(object):
                 self.COALA_GNN_Cache = SSD_GNN_NVSHMEM_Cache(self.SSD_Controllers,  self.node_distributor.distribute_manager, self.MPI_comm_manager.global_rank, self.MPI_comm_manager.local_size, cache_size, self.sim_buf.data_ptr())
             else:
                 self.COALA_GNN_Cache = SSD_GNN_NVSHMEM_Cache(self.SSD_Controllers,  self.node_distributor.distribute_manager, self.MPI_comm_manager.global_rank, self.MPI_comm_manager.local_size, cache_size, 0)
-            print("NVSHMEM Cache mangaer done")
 
         elif (self.cache_backend == "nccl"):
             print(f"Unsupported cache backend: {self.cache_backend}")
