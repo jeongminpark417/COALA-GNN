@@ -8,7 +8,7 @@ from dgl.data import DGLDataset
 import warnings
 warnings.filterwarnings("ignore")
 
-from Shared_Tensor import MPI_Comm_Manager, Shared_UVA_Tensor_Manager
+from COALA_GNN import MPI_Comm_Manager, Shared_UVA_Tensor_Manager
 import cupy as cp
 from mpi4py import MPI
 import gc
@@ -141,7 +141,7 @@ class IGB260MDGLDataset(DGLDataset):
         node_edges = torch.from_numpy(dataset.paper_edge)
         node_labels = torch.from_numpy(dataset.paper_label).to(torch.long)
 
-        print("node edge:", node_edges)
+        #print("node edge:", node_edges)
         #cur_path = osp.join(self.dir, self.args.dataset_size, 'processed')
         # cur_path = '/mnt/nvme16/IGB260M_part_2/full/processed'
         # edge_row_idx = torch.from_numpy(np.load(cur_path + '/paper__cites__paper/edge_index_csc_row_idx.npy'))
@@ -154,17 +154,13 @@ class IGB260MDGLDataset(DGLDataset):
         # else:
         
         self.graph = dgl.graph((node_edges[:, 0],node_edges[:, 1]), num_nodes=node_features.shape[0])
-        print("self graph: ", self.graph.formats()) 
-        print("skipping feat")
         self.graph.ndata['feat'] = node_features
         
 
         self.graph.ndata['label'] = node_labels
-        print("self graph2: ", self.graph.formats())
         if self.args.dataset_size != 'full':
             self.graph = dgl.remove_self_loop(self.graph)
             self.graph = dgl.add_self_loop(self.graph)
-        print("self graph3: ", self.graph.formats())
         
         if self.args.dataset_size == 'full':
             #TODO: Put this is a meta.pt file
@@ -291,7 +287,7 @@ class IGBDatast_Shared_UVA(DGLDataset):
         if(self.local_rank == 0):
             edge_path = osp.join(self.dir, self.size, 'processed', 'paper__cites__paper', 'edge_index.npy')
             edge_array = np.load(edge_path)
-            print(f"edge type: {edge_array.dtype} Bytes: {edge_array.nbytes}, Shape: {edge_array.shape}")
+            #print(f"edge type: {edge_array.dtype} Bytes: {edge_array.nbytes}, Shape: {edge_array.shape}")
             edge_array_size[0] = edge_array.nbytes
             edge_shape_list = np.array(edge_array.shape)
 
@@ -306,22 +302,22 @@ class IGBDatast_Shared_UVA(DGLDataset):
 
         self.shared_UVA_manager = Shared_UVA_Tensor_Manager(self.comm_manager, "/shared_mem", edge_array_size[0])
         node_edges = self.shared_UVA_manager.get_tensor(dtype=cp.int64, tensor_shape=edge_shape)
-        print(f"node edges shape: {node_edges.shape} device: {node_edges.device} array: {node_edges}" )
+        #print(f"node edges shape: {node_edges.shape} device: {node_edges.device} array: {node_edges}" )
         self.shared_UVA_manager.write_np_array(node_edges, edge_array)
-        print(f"After COPY node edges shape: {node_edges.shape} device: {node_edges.device} array: {node_edges}" )
+        #print(f"After COPY node edges shape: {node_edges.shape} device: {node_edges.device} array: {node_edges}" )
         del edge_array
 
         gc.collect()
-        print("Freed local graph data")
+        #print("Freed local graph data")
 
         node_labels = torch.from_numpy(self.get_label()).to(torch.long).to(self.device)
 
         n_nodes = self.num_nodes()
-        print("Number of Nodes: ", n_nodes)
+        #print("Number of Nodes: ", n_nodes)
         self.graph = dgl.graph((node_edges[:, 0],node_edges[:, 1]), num_nodes=n_nodes)
         self.graph.ndata['label'] = node_labels
         self.graph  = self.graph.formats('csc')
-        print(self.graph.formats())
+        #print(self.graph.formats())
 
 
         if self.args.dataset_size == 'full':
@@ -420,7 +416,7 @@ class IGBDatast_Shared_CSC_UVA(DGLDataset):
             feat_shape_list = np.empty([2], dtype="int")
             emb = None
             if(self.local_rank == 0):
-                print("Loading feature data into CPU for SSD simulation")
+                #print("Loading feature data into CPU for SSD simulation")
                 feat_path = osp.join(self.dir, self.size, 'processed', 'paper', 'node_feat.npy')
                 emb = np.load(feat_path)
                 feat_array_size[0] = emb.nbytes
@@ -458,19 +454,19 @@ class IGBDatast_Shared_CSC_UVA(DGLDataset):
             #(indptr, indices, edge_ids)
             indptr_path = osp.join(self.dir, self.size, 'processed', 'paper__cites__paper', 'csc_indptr.npy')
             csc_indptr_array = np.load(indptr_path)
-            print(f"edge type: {csc_indptr_array.dtype} Bytes: {csc_indptr_array.nbytes}, Shape: {csc_indptr_array.shape}")
+            #print(f"edge type: {csc_indptr_array.dtype} Bytes: {csc_indptr_array.nbytes}, Shape: {csc_indptr_array.shape}")
             csc_indptr_array_size[0] = csc_indptr_array.nbytes
             csc_indptr_shape_list = np.array(csc_indptr_array.shape)
 
             indices_path = osp.join(self.dir, self.size, 'processed', 'paper__cites__paper', 'csc_indices.npy')
             csc_indices_array = np.load(indices_path)
-            print(f"edge type: {csc_indices_array.dtype} Bytes: {csc_indices_array.nbytes}, Shape: {csc_indices_array.shape}")
+            #print(f"edge type: {csc_indices_array.dtype} Bytes: {csc_indices_array.nbytes}, Shape: {csc_indices_array.shape}")
             csc_indices_array_size[0] = csc_indices_array.nbytes
             csc_indices_shape_list = np.array(csc_indices_array.shape)
 
             edge_ids_path = osp.join(self.dir, self.size, 'processed', 'paper__cites__paper', 'csc_edge_ids.npy')
             csc_edge_ids_array = np.load(edge_ids_path)
-            print(f"edge type: {csc_edge_ids_array.dtype} Bytes: {csc_edge_ids_array.nbytes}, Shape: {csc_edge_ids_array.shape}")
+            #print(f"edge type: {csc_edge_ids_array.dtype} Bytes: {csc_edge_ids_array.nbytes}, Shape: {csc_edge_ids_array.shape}")
             csc_edge_ids_array_size[0] = csc_edge_ids_array.nbytes
             csc_edge_ids_shape_list = np.array(csc_edge_ids_array.shape)
 
@@ -499,27 +495,27 @@ class IGBDatast_Shared_CSC_UVA(DGLDataset):
 
         self.shared_UVA_manager_indptr = Shared_UVA_Tensor_Manager(self.comm_manager, "/shared_mem_1", csc_indptr_array_size[0])
         csc_indptr = self.shared_UVA_manager_indptr.get_tensor(dtype=np.int64, tensor_shape=csc_indptr_shape, device=self.device)
-        print(f"node edges shape: {csc_indptr.shape} device: {csc_indptr.device} array: {csc_indptr}" )
+        #print(f"node edges shape: {csc_indptr.shape} device: {csc_indptr.device} array: {csc_indptr}" )
         self.shared_UVA_manager_indptr.write_np_array(csc_indptr, csc_indptr_array)
-        print(f"After COPY node edges shape: {csc_indptr.shape} device: {csc_indptr.device} array: {csc_indptr}" )
+        #print(f"After COPY node edges shape: {csc_indptr.shape} device: {csc_indptr.device} array: {csc_indptr}" )
         del csc_indptr_array
 
         self.shared_UVA_manager_indicies = Shared_UVA_Tensor_Manager(self.comm_manager, "/shared_mem_2", csc_indices_array_size[0])
         csc_indicies = self.shared_UVA_manager_indicies.get_tensor(dtype=np.int64, tensor_shape=csc_indices_shape, device=self.device)
-        print(f"node edges shape: {csc_indicies.shape} device: {csc_indicies.device} array: {csc_indicies}" )
+        #print(f"node edges shape: {csc_indicies.shape} device: {csc_indicies.device} array: {csc_indicies}" )
         self.shared_UVA_manager_indicies.write_np_array(csc_indicies, csc_indices_array)
-        print(f"After COPY node edges shape: {csc_indicies.shape} device: {csc_indicies.device} array: {csc_indicies}" )
+        #print(f"After COPY node edges shape: {csc_indicies.shape} device: {csc_indicies.device} array: {csc_indicies}" )
         del csc_indices_array
 
         self.shared_UVA_manager_edge_id = Shared_UVA_Tensor_Manager(self.comm_manager, "/shared_mem_3", csc_edge_ids_array_size[0])
         edge_ids_indicies = self.shared_UVA_manager_edge_id.get_tensor(dtype=np.int64, tensor_shape=csc_edge_ids_shape, device=self.device)
-        print(f"node edges shape: {edge_ids_indicies.shape} device: {edge_ids_indicies.device} array: {edge_ids_indicies}" )
+        #print(f"node edges shape: {edge_ids_indicies.shape} device: {edge_ids_indicies.device} array: {edge_ids_indicies}" )
         self.shared_UVA_manager_edge_id.write_np_array(edge_ids_indicies, csc_edge_ids_array)
-        print(f"After COPY node edges shape: {edge_ids_indicies.shape} device: {edge_ids_indicies.device} array: {edge_ids_indicies}" )
+        #print(f"After COPY node edges shape: {edge_ids_indicies.shape} device: {edge_ids_indicies.device} array: {edge_ids_indicies}" )
         del csc_edge_ids_array
 
         gc.collect()
-        print("Freed local graph data")
+        #print("Freed local graph data")
 
         node_labels = torch.from_numpy(self.get_label()).to(torch.long).to(self.device)
 
@@ -527,7 +523,7 @@ class IGBDatast_Shared_CSC_UVA(DGLDataset):
         self.graph = dgl.graph(('csc',(csc_indptr, csc_indicies, edge_ids_indicies)), num_nodes=n_nodes, idtype=torch.int64, device=self.device)
         self.graph  = self.graph.formats('csc')
         self.graph.ndata['label'] = node_labels
-        print(self.graph.formats())
+        #print(self.graph.formats())
 
 
 
@@ -590,7 +586,7 @@ class OGBDataset_Shared_UVA(DGLDataset):
             feat_shape_list = np.empty([2], dtype="int")
             emb = None
             if(self.local_rank == 0):
-                print("Loading feature data into CPU for SSD simulation")
+                #print("Loading feature data into CPU for SSD simulation")
                 feat_path = osp.join(self.dir, 'raw', 'node_feat.npy')
                 emb = np.load(feat_path)
                 feat_array_size[0] = emb.nbytes
@@ -632,13 +628,13 @@ class OGBDataset_Shared_UVA(DGLDataset):
 
         self.shared_UVA_manager = Shared_UVA_Tensor_Manager(self.comm_manager, "/shared_mem", edge_array_size[0])
         node_edges = self.shared_UVA_manager.get_tensor(dtype=cp.int64, tensor_shape=edge_shape)
-        print(f"node edges shape: {node_edges.shape} device: {node_edges.device} array: {node_edges}" )
+        #print(f"node edges shape: {node_edges.shape} device: {node_edges.device} array: {node_edges}" )
         self.shared_UVA_manager.write_np_array(node_edges, edge_array)
-        print(f"After COPY node edges shape: {node_edges.shape} device: {node_edges.device} array: {node_edges}" )
+        #print(f"After COPY node edges shape: {node_edges.shape} device: {node_edges.device} array: {node_edges}" )
         del edge_array
 
         gc.collect()
-        print("Freed local graph data")
+        #print("Freed local graph data")
 
 
 
@@ -654,7 +650,7 @@ class OGBDataset_Shared_UVA(DGLDataset):
         self.graph = dgl.graph((node_edges[0,:],node_edges[1,:]), num_nodes=n_nodes)
         self.graph.ndata['label'] = node_labels_torch
 
-        print(self.graph.formats())
+        #print(self.graph.formats())
 
 
         total_count = len(non_nan_indices)
@@ -707,11 +703,11 @@ class OGBDataset_Shared_CSC_UVA(DGLDataset):
             feat_shape_list = np.empty([2], dtype="int")
             emb = None
             if(self.local_rank == 0):
-                print("Loading feature data into CPU for SSD simulation")
+                #print("Loading feature data into CPU for SSD simulation")
                 feat_path = osp.join(self.dir, 'raw', 'node_feat.npy')
                 emb = np.load(feat_path)
                 feat_array_size[0] = emb.nbytes
-                print(f"Feature data size: {emb.nbytes}B")
+                #print(f"Feature data size: {emb.nbytes}B")
                 feat_shape_list = np.array(emb.shape)
 
             #Sharing feat information
@@ -746,19 +742,19 @@ class OGBDataset_Shared_CSC_UVA(DGLDataset):
             #(indptr, indices, edge_ids)
             indptr_path = osp.join(self.dir, 'raw', 'csc_indptr.npy')
             csc_indptr_array = np.load(indptr_path)
-            print(f"edge type: {csc_indptr_array.dtype} Bytes: {csc_indptr_array.nbytes}, Shape: {csc_indptr_array.shape}")
+            #print(f"edge type: {csc_indptr_array.dtype} Bytes: {csc_indptr_array.nbytes}, Shape: {csc_indptr_array.shape}")
             csc_indptr_array_size[0] = csc_indptr_array.nbytes
             csc_indptr_shape_list = np.array(csc_indptr_array.shape)
 
             indices_path = osp.join(self.dir, 'raw', 'csc_indices.npy')
             csc_indices_array = np.load(indices_path)
-            print(f"edge type: {csc_indices_array.dtype} Bytes: {csc_indices_array.nbytes}, Shape: {csc_indices_array.shape}")
+            #print(f"edge type: {csc_indices_array.dtype} Bytes: {csc_indices_array.nbytes}, Shape: {csc_indices_array.shape}")
             csc_indices_array_size[0] = csc_indices_array.nbytes
             csc_indices_shape_list = np.array(csc_indices_array.shape)
 
             edge_ids_path = osp.join(self.dir, 'raw', 'csc_edge_ids.npy')
             csc_edge_ids_array = np.load(edge_ids_path)
-            print(f"edge type: {csc_edge_ids_array.dtype} Bytes: {csc_edge_ids_array.nbytes}, Shape: {csc_edge_ids_array.shape}")
+            #print(f"edge type: {csc_edge_ids_array.dtype} Bytes: {csc_edge_ids_array.nbytes}, Shape: {csc_edge_ids_array.shape}")
             csc_edge_ids_array_size[0] = csc_edge_ids_array.nbytes
             csc_edge_ids_shape_list = np.array(csc_edge_ids_array.shape)
 
@@ -787,28 +783,28 @@ class OGBDataset_Shared_CSC_UVA(DGLDataset):
 
         self.shared_UVA_manager_indptr = Shared_UVA_Tensor_Manager(self.comm_manager, "/shared_mem_1", csc_indptr_array_size[0])
         csc_indptr = self.shared_UVA_manager_indptr.get_tensor(dtype=np.int64, tensor_shape=csc_indptr_shape, device=self.device)
-        print(f"node edges shape: {csc_indptr.shape} device: {csc_indptr.device} array: {csc_indptr}" )
+        #print(f"node edges shape: {csc_indptr.shape} device: {csc_indptr.device} array: {csc_indptr}" )
         self.shared_UVA_manager_indptr.write_np_array(csc_indptr, csc_indptr_array)
-        print(f"After COPY node edges shape: {csc_indptr.shape} device: {csc_indptr.device} array: {csc_indptr}" )
+        #print(f"After COPY node edges shape: {csc_indptr.shape} device: {csc_indptr.device} array: {csc_indptr}" )
         del csc_indptr_array
 
         self.shared_UVA_manager_indicies = Shared_UVA_Tensor_Manager(self.comm_manager, "/shared_mem_2", csc_indices_array_size[0])
         csc_indicies = self.shared_UVA_manager_indicies.get_tensor(dtype=np.int64, tensor_shape=csc_indices_shape, device=self.device)
-        print(f"node edges shape: {csc_indicies.shape} device: {csc_indicies.device} array: {csc_indicies}" )
+        #print(f"node edges shape: {csc_indicies.shape} device: {csc_indicies.device} array: {csc_indicies}" )
         self.shared_UVA_manager_indicies.write_np_array(csc_indicies, csc_indices_array)
-        print(f"After COPY node edges shape: {csc_indicies.shape} device: {csc_indicies.device} array: {csc_indicies}" )
+        #print(f"After COPY node edges shape: {csc_indicies.shape} device: {csc_indicies.device} array: {csc_indicies}" )
         del csc_indices_array
 
         self.shared_UVA_manager_edge_id = Shared_UVA_Tensor_Manager(self.comm_manager, "/shared_mem_3", csc_edge_ids_array_size[0])
         edge_ids_indicies = self.shared_UVA_manager_edge_id.get_tensor(dtype=np.int64, tensor_shape=csc_edge_ids_shape, device=self.device)
-        print(f"node edges shape: {edge_ids_indicies.shape} device: {edge_ids_indicies.device} array: {edge_ids_indicies}" )
+        #print(f"node edges shape: {edge_ids_indicies.shape} device: {edge_ids_indicies.device} array: {edge_ids_indicies}" )
         self.shared_UVA_manager_edge_id.write_np_array(edge_ids_indicies, csc_edge_ids_array)
-        print(f"After COPY node edges shape: {edge_ids_indicies.shape} device: {edge_ids_indicies.device} array: {edge_ids_indicies}" )
+        #print(f"After COPY node edges shape: {edge_ids_indicies.shape} device: {edge_ids_indicies.device} array: {edge_ids_indicies}" )
         del csc_edge_ids_array
 
 
         gc.collect()
-        print("Freed local graph data")
+        #print("Freed local graph data")
 
 
 
@@ -824,7 +820,7 @@ class OGBDataset_Shared_CSC_UVA(DGLDataset):
         self.graph = dgl.graph(('csc',(csc_indptr, csc_indicies, edge_ids_indicies)), num_nodes=n_nodes, idtype=torch.int64, device=self.device)
         self.graph  = self.graph.formats('csc')
         self.graph.ndata['label'] = node_labels_torch
-        print(self.graph.formats())
+        #print(self.graph.formats())
 
 
         total_count = len(non_nan_indices)
