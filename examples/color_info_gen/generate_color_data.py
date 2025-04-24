@@ -4,9 +4,8 @@ import dgl
 import torch, torch.nn as nn, torch.optim as optim
 import time, tqdm, numpy as np
 
-from models import *
 from dataloader import IGB260MDGLDataset
-from COALA_GNN import Graph_Coloring
+from COALA_GNN_Pybind import Graph_Coloring
 from dataloader import load_ogb_graph
 
 def color_graph(g, args, device):
@@ -56,11 +55,16 @@ def color_graph(g, args, device):
 
     del Grah_Coloring_Tool
     print("saving Numpy Arrays")
-    np.save(args.out_path_color, color_tensor.cpu().numpy())
+    output_path = args.out_path
+    out_path_color = output_path + "/color.npy"
+    out_path_topk = output_path + "/topk.npy"
+    out_path_affinity = output_path + "/score.npy"
+
+    np.save(out_path_color, color_tensor.cpu().numpy())
     topk_color_tensor = topk_color_tensor.reshape(num_colors, args.topk)
-    np.save(args.out_path_topk, topk_color_tensor.cpu().numpy())
+    np.save(out_path_topk, topk_color_tensor.cpu().numpy())
     topk_affinity_tensor = topk_affinity_tensor.reshape(num_colors, args.topk)
-    np.save(args.out_path_affinity, topk_affinity_tensor.cpu().numpy())
+    np.save(out_path_affinity, topk_affinity_tensor.cpu().numpy())
     print("Saving is done")
  
 
@@ -82,12 +86,14 @@ if __name__ == '__main__':
     parser.add_argument('--emb_size', type=int, default=1024)
 
     #Output file format
-    parser.add_argument('--out_path_color', type=str, default='./color.npy',
+    parser.add_argument('--out_path', type=str, default='./',
         help='path for the output color file')
-    parser.add_argument('--out_path_topk', type=str, default='./topk.npy', 
-        help='path for the output topk file')
-    parser.add_argument('--out_path_affinity', type=str, default='./score.npy', 
-        help='path for the output topk file')
+    # parser.add_argument('--out_path_color', type=str, default='./color.npy',
+    #     help='path for the output color file')
+    # parser.add_argument('--out_path_topk', type=str, default='./topk.npy', 
+    #     help='path for the output topk file')
+    # parser.add_argument('--out_path_affinity', type=str, default='./score.npy', 
+    #     help='path for the output topk file')
 
     parser.add_argument('--topk', type=int, default=10)
     parser.add_argument('--device', type=int, default=0)

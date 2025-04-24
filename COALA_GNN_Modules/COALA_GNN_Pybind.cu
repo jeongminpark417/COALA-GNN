@@ -17,6 +17,7 @@
 #include "node_distributor_pybind.cuh"
 #include "shared_UVA.cuh"
 #include "nvshmem_manager.cuh"
+#include "graph_coloring.cpp"
 
 #define BLOCK_SIZE 256
 
@@ -58,6 +59,18 @@ PYBIND11_MODULE(COALA_GNN_Pybind, m) {
         .def("free", &NVSHMEM_Manager::free)
         .def("finalize", &NVSHMEM_Manager::finalize);
 
-
+    py::class_<Graph_Coloring>(m, "Graph_Coloring")
+        .def(py::init<uint64_t>())
+        .def("cpu_color_graph", &Graph_Coloring::cpu_color_graph)
+        .def("cpu_color_graph_optimized", &Graph_Coloring::cpu_color_graph_optimized)
+        .def("cpu_count_nearest_color", &Graph_Coloring::cpu_count_nearest_color)
+        .def("cpu_count_nearest_color_less_memory", &Graph_Coloring::cpu_count_nearest_color_less_memory)
+        .def("cpu_calculate_color_affinity", &Graph_Coloring::cpu_calculate_color_affinity)
+        .def("set_color_buffer", &Graph_Coloring::set_color_buffer)
+        .def("set_topk_color_buffer", &Graph_Coloring::set_topk_color_buffer)
+        .def("set_topk_affinity_buffer", &Graph_Coloring::set_topk_affinity_buffer)
+        .def("set_adj_csc", &Graph_Coloring::set_adj_csc)
+        .def("get_num_color_node", &Graph_Coloring::get_num_color_node)
+        .def("get_num_color", &Graph_Coloring::get_num_color);
 
 }
