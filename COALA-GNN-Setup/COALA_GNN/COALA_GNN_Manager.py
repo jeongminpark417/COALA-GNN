@@ -1,4 +1,4 @@
-from COALA_GNN_Pybind import NVSHMEM_Manager, SSD_GNN_SSD_Controllers, SSD_GNN_NVSHMEM_Cache
+from COALA_GNN_Pybind import NVSHMEM_Manager, SSD_GNN_SSD_Controllers, SSD_GNN_NVSHMEM_Cache, Isolated_Cache
 from mpi4py import MPI
 import cupy as cp
 import torch
@@ -95,8 +95,12 @@ class COALA_GNN_Manager(object):
             else:
                 self.COALA_GNN_Cache = SSD_GNN_NVSHMEM_Cache(self.SSD_Controllers,  self.node_distributor.distribute_manager, self.MPI_comm_manager.global_rank, self.MPI_comm_manager.local_size, cache_size, 0)
 
-        elif (self.cache_backend == "nccl"):
-            print(f"Unsupported cache backend: {self.cache_backend}")
+        elif (self.cache_backend == "isolated" or self.cache_backend == "nccl"):
+            if(self.is_simulation):
+                self.COALA_GNN_Cache = Isolated_Cache(self.SSD_Controllers,  self.node_distributor.distribute_manager, self.MPI_comm_manager.global_rank, self.MPI_comm_manager.local_size, cache_size, self.sim_buf.data_ptr())
+            else:
+                self.COALA_GNN_Cache = Isolated_Cache(self.SSD_Controllers,  self.node_distributor.distribute_manager, self.MPI_comm_manager.global_rank, self.MPI_comm_manager.local_size, cache_size, 0)
+
         else:
             print(f"Unsupported cache backend: {self.cache_backend}")
             return
@@ -117,7 +121,13 @@ class COALA_GNN_Manager(object):
             self.COALA_GNN_Cache.send_requests(index_ptr, index_size, request_tensor_ptr, self.max_sample_size)
             self.COALA_GNN_Cache.read_feature(return_torch_ptr, request_tensor_ptr, self.max_sample_size)
 
-            return (*batch, return_torch)
+            return (*batch, return_torch)  
+
+        elif(self.cache_backend == "isolated"):
+            return_torch =  torch.zeros([index_size, self.dim], dtype=torch.float, device=self.device)
+            self.COALA_GNN_Cache.read_feature(return_torch.data_ptr(), index_ptr, index_size)
+            return (*batch, return_torch) 
+            
         else:
             print("Unsupported cache backend for fetch_feature")
             return

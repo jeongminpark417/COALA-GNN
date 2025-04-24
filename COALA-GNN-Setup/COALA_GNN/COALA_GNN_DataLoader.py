@@ -137,7 +137,7 @@ class COALA_GNN_DataLoader(torch.utils.data.DataLoader):
         self.counter = 0
         self.index_len = len(self.node_distributor.index_tensor)
         self.total_count = int(self.index_len / self.node_distributor.global_batch_size) - 1
-        print(f"Index len: {self.index_len}")
+        #print(f"Index len: {self.index_len}")
         
     def __iter__(self):
         return self

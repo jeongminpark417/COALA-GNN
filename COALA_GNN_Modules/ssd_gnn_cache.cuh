@@ -2,6 +2,7 @@
 #include <stdexcept>  // for std::runtime_error
 #include <ctrl.h>  // for NVME controller
 #include "nvshmem_cache.h"
+#include "isolated_cache.h"
 #include "cache_kernel.cu"
 #include "node_distributor_pybind.cuh"
 
@@ -104,7 +105,7 @@ class SSD_GNN_NVSHMEM_Cache {
             cuda_err_chk(cudaDeviceSynchronize());
             cuda_err_chk(cudaMalloc(&d_request_counters, sizeof(unsigned int) * num_gpus));
 
-            printf("Init done\n");
+            //printf("Init done\n");
         }
 
         void send_requests(uint64_t i_src_index_ptr, int64_t num_index, uint64_t i_nvshmem_request_ptr, int max_index){
@@ -158,7 +159,6 @@ class SSD_GNN_NVSHMEM_Cache {
                 uint64_t b_size = 128;
                 uint64_t n_warp = b_size / 32;
                 uint64_t g_size = (h_request_counters[i]+n_warp - 1) / n_warp;
-//                total_access += h_request_counters[i];
                 NVShmem_read_feature_kernel<<<g_size, b_size, 0, streams[i]>>>(i, cache_ptr, tensor_ptr,
                                                             nvshmem_index_ptr + max_index * 2 * i, dim, h_request_counters[i], cache_dim, local_rank);
             }
@@ -193,7 +193,100 @@ class SSD_GNN_NVSHMEM_Cache {
             cudaFree(d_request_counters);
             delete cache_handle;
         }
-                                    
+};
+
+
+        
+
+class Isolated_Cache {
+
+    private:
+        uint32_t num_ways = 32;
+        uint64_t num_sets;
+        uint64_t num_pages;
+        int num_gpus;
+        int local_rank;
+        int dim;
+        int cache_dim;
+        bool track_color = true;
+        int64_t* color_buffer_ptr = nullptr;
+        int num_color;
+
+        bool is_simulation = false;
+        float* sim_buf;
+        
+    
+        Isolated_cache_handle<float>* cache_handle;
+        Isolated_cache_d_t<float>* cache_ptr;
+        unsigned int* d_request_counters;
+
+        int global_rank;
+
+
+    public:
+        Isolated_Cache(SSD_GNN_SSD_Controllers SSD_Controllers, Node_distributor_pybind& node_distributer, int g_rank, int n_gpus, uint64_t cache_size, uint64_t sim_b): 
+            num_gpus(n_gpus),
+            global_rank(g_rank)
+            {
+            if(sim_b != 0) 
+                is_simulation = true;
+            sim_buf = (float*) sim_b;
+            color_buffer_ptr = node_distributer.get_color_buffer_ptr();
+            num_color = node_distributer.get_num_colors();
+            local_rank = SSD_Controllers.cudaDevice;
+            dim = SSD_Controllers.dim;
+            cache_dim = SSD_Controllers.cache_dim;
+            num_pages = cache_size * 1024LL*1024/(SSD_Controllers.page_size);
+            num_sets = num_pages / num_ways;
+            cache_handle = new Isolated_cache_handle<float>(
+                num_sets, num_ways, SSD_Controllers.page_size, SSD_Controllers.ctrls,  global_rank, SSD_Controllers.cudaDevice, num_gpus, track_color, color_buffer_ptr, num_color, is_simulation, sim_buf);
+                                                        
+                                                        // cpu_ways, is_simulation, sim_buf,
+                                                        //     use_color_data, num_colors, color_buffer_ptr);
+            cache_ptr = cache_handle -> get_ptr();
+
+            cuda_err_chk(cudaDeviceSynchronize());
+            cuda_err_chk(cudaMalloc(&d_request_counters, sizeof(unsigned int) * num_gpus));
+
+            //printf("Init done\n");
+        }
+
+
+        void read_feature(uint64_t i_return_tensor_ptr, uint64_t i_index_ptr, int64_t max_index) {
+            
+            float *tensor_ptr = (float *) i_return_tensor_ptr;
+            int64_t *index_ptr = (int64_t *)i_index_ptr;
+        
+            int b_size = 64;
+            uint64_t g_size = (max_index+b_size - 1) / b_size;
+            uint64_t bid = blockIdx.x;
+
+            Isolated_read_feature_kernel<<<g_size, b_size>>>(cache_ptr, tensor_ptr, index_ptr, dim, max_index, cache_dim);
+            cuda_err_chk(cudaDeviceSynchronize());
+            return;
+        }
+
+        void get_cache_data(int64_t ret_i_ptr){
+            int32_t* cache_meta_data = cache_handle->get_color_counter_ptr();
+            int32_t* dst = (int32_t*) ret_i_ptr;
+
+            int32_t sum = 0;
+            for(int i = 0; i < num_color; i++ ){
+                dst[i] = cache_meta_data[i];
+            }
+            // printf("sum:%i\n", sum);
+            return;
+        }
+
+        void print_stats(){
+            print_stats_kernel<<<1,1>>>(cache_ptr);
+        }
+
+        ~Isolated_Cache(){
+            cudaFree(d_request_counters);
+            delete cache_handle;
+        }
+                          
 
 };
 

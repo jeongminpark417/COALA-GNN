@@ -57,6 +57,30 @@ void NVShmem_read_feature_kernel(int gpu_id, Cache_Type *cache, float *out_tenso
 }
 
 template<typename Cache_Type>
+__global__ 
+void Isolated_read_feature_kernel( Cache_Type *cache, float *out_tensor_ptr,
+                                    int64_t *index_ptr, int dim,
+                                    int64_t num_idx, int cache_dim) {
+  uint64_t bid = blockIdx.x;
+  int num_warps = blockDim.x / 32;
+  int warp_id = threadIdx.x / 32;
+  int idx_idx = bid * num_warps + warp_id;
+
+  if (idx_idx < num_idx) {
+    //Request is a pair (node id, batch idx)
+    int64_t batch_idx = index_ptr[idx_idx];
+    uint64_t tid = threadIdx.x % 32;
+    //    get_data(uint64_t id, T* output_ptr, int rank, int dst_gpu){
+   // printf("tid: %i row_index:%i\n", (int) idx_idx, (int) row_index);
+    cache->get_data(idx_idx, out_tensor_ptr + (batch_idx) * dim);
+  } 
+}
+
+
+
+
+
+template<typename Cache_Type>
 __global__
 void print_stats_kernel(Cache_Type* cache){
   cache->print_stats();

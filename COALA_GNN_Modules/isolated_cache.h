@@ -22,8 +22,7 @@
 #include "nvm_cmd.h"
 
 #include "seqlock.h"
-#include "nvshmem.h"
-#include "nvshmemx.h"
+
 
 #define FULL_MASK 0xFFFFFFFF
 #define FF_64 0xFFFFFFFFFFFFFFFF
@@ -37,7 +36,7 @@
 template <typename T = float>
  __forceinline__
 __device__
-void warp_memcpy(void* src, void* dst, size_t size, uint32_t mask){
+void iso_warp_memcpy(void* src, void* dst, size_t size, uint32_t mask){
      T* src_ptr = (T*) src;
      T* dst_ptr = (T*) dst;
      
@@ -52,7 +51,7 @@ void warp_memcpy(void* src, void* dst, size_t size, uint32_t mask){
 
 
 template<typename T>
-struct NVSHMEM_cache_d_t {
+struct Isolated_cache_d_t {
 
     unsigned num_gpus, my_GPU_id_;
     seqlock* set_locks_, *way_locks_;
@@ -86,7 +85,7 @@ struct NVSHMEM_cache_d_t {
 
     int global_rank;
 
-    NVSHMEM_cache_d_t(seqlock* set_locks, seqlock* way_locks,uint64_t n_sets, uint64_t n_ways, uint64_t cl_size, uint64_t* keys, uint32_t* set_cnt,
+    Isolated_cache_d_t(seqlock* set_locks, seqlock* way_locks,uint64_t n_sets, uint64_t n_ways, uint64_t cl_size, uint64_t* keys, uint32_t* set_cnt,
                  Controller** d_ctrls, uint32_t n_ctrls, uint64_t n_blocks_per_page, uint8_t* base_addr, uint64_t* prp1, uint64_t* prp2, bool prps,
                  simt::atomic<uint64_t, simt::thread_scope_device>* queue_head, simt::atomic<uint64_t, simt::thread_scope_device>* queue_tail, 
                  simt::atomic<uint64_t, simt::thread_scope_device>* queue_lock, simt::atomic<uint64_t, simt::thread_scope_device>* queue_extra_reads,
@@ -327,7 +326,7 @@ struct NVSHMEM_cache_d_t {
         //return;
        // __nanosleep(1000*10);
         void* src = sim_buf + (pg_id) * CL_SIZE;
-        warp_memcpy<float>(src, dst, CL_SIZE, mask);
+        iso_warp_memcpy<float>(src, dst, CL_SIZE, mask);
         return;
     }
                 
@@ -336,15 +335,14 @@ struct NVSHMEM_cache_d_t {
     __forceinline__
     __device__
     void 
-    get_data(uint64_t id, T* output_ptr, int rank, int dst_gpu){
+    get_data(uint64_t id, T* output_ptr){
 
         uint32_t lane = lane_id();
         uint32_t mask = __activemask();
 
-        //uint64_t cl_id = id / num_gpus;
         uint64_t cl_id = id ;
 
-        uint64_t set_id = get_dist_set_id(cl_id, num_gpus);
+        uint64_t set_id = get_set_id(cl_id);
         uint64_t set_offset = set_id * (num_ways);
         seqlock* cur_set_lock = set_locks_ + set_id;
         seqlock* cur_cl_seqlock = way_locks_ + set_id * (num_ways );
@@ -378,7 +376,7 @@ struct NVSHMEM_cache_d_t {
                     if(cl_id == (*way_key)){
                         hit = true;
                         void* src = ((void*)base_addr_)+ (set_offset + way) * CL_SIZE;
-                        nvshmemx_float_put_warp(output_ptr, (float*) src, CL_SIZE/sizeof(float), dst_gpu);
+                        iso_warp_memcpy<float>(src, output_ptr, CL_SIZE, mask);
                     }
 
                     __syncwarp(mask);
@@ -458,7 +456,7 @@ struct NVSHMEM_cache_d_t {
         __syncwarp(mask);
 
         void* src = ((void*)base_addr_)+ (set_offset + way) * CL_SIZE;
-        nvshmemx_float_put_warp(output_ptr, (float*) src, CL_SIZE/sizeof(float), dst_gpu);
+        iso_warp_memcpy<float>(src, output_ptr, CL_SIZE, mask);
     
         if(lane == warp_leader) 
             miss_cnt.fetch_add(1, simt::memory_order_relaxed);
@@ -476,8 +474,8 @@ struct NVSHMEM_cache_d_t {
 
 
 template<typename T>
-struct NVSHMEM_cache_handle{
-    NVSHMEM_cache_d_t<T>* cache_ptr = nullptr;
+struct Isolated_cache_handle{
+    Isolated_cache_d_t<T>* cache_ptr = nullptr;
 
     seqlock* d_set_locks, *d_way_locks;
     uint64_t num_sets_, num_ways_, CL_SIZE_;
@@ -514,7 +512,7 @@ struct NVSHMEM_cache_handle{
 
 
     __host__ 
-    NVSHMEM_cache_handle(uint64_t num_sets, uint64_t  num_ways, uint64_t cl_size, const std::vector<Controller*>& ctrls, int g_rank,
+    Isolated_cache_handle(uint64_t num_sets, uint64_t  num_ways, uint64_t cl_size, const std::vector<Controller*>& ctrls, int g_rank,
                          unsigned int my_GPU_id, unsigned n_gpus, bool track_color_flag, int64_t* color_data_ptr, int num_color, bool is_simulation, float* sim_b) :
     num_sets_(num_sets),
     num_ways_(num_ways),
@@ -548,7 +546,7 @@ struct NVSHMEM_cache_handle{
         cuda_err_chk(cudaMemset(set_cnt_, 0, sizeof(uint32_t) * num_sets_));
         cuda_err_chk(cudaMemset(keys_, 0xFF, sizeof(uint64_t) * num_sets_ * (num_ways_ )));
 
-        cuda_err_chk(cudaMalloc((void**)&cache_ptr, sizeof(NVSHMEM_cache_d_t<T>)));
+        cuda_err_chk(cudaMalloc((void**)&cache_ptr, sizeof(Isolated_cache_d_t<T>)));
 
        if(track_color){
             //printf("allocating color counters num_color %i \n", num_color_);
@@ -619,7 +617,7 @@ struct NVSHMEM_cache_handle{
                 }
         }
 
-        NVSHMEM_cache_d_t<T> cache_host(d_set_locks, d_way_locks, num_sets_, num_ways_, CL_SIZE_, keys_, set_cnt_, 
+        Isolated_cache_d_t<T> cache_host(d_set_locks, d_way_locks, num_sets_, num_ways_, CL_SIZE_, keys_, set_cnt_, 
         d_ctrls, n_ctrls, n_blocks_per_page, base_addr, prp1, prp2, prps,
         cache_q_head, cache_q_tail, cache_q_lock, cache_extra_reads, 
         track_color, color_data_buf, device_color_counters, color_meta,
@@ -628,12 +626,12 @@ struct NVSHMEM_cache_handle{
         SSD_SIM, sim_buf);
 
 
-        cuda_err_chk(cudaMemcpy(cache_ptr, &cache_host, sizeof(NVSHMEM_cache_d_t<T>), cudaMemcpyHostToDevice));
+        cuda_err_chk(cudaMemcpy(cache_ptr, &cache_host, sizeof(Isolated_cache_d_t<T>), cudaMemcpyHostToDevice));
         //std::cout << "Cache Device Setting Done\n";
     }
 
     __host__ 
-    ~NVSHMEM_cache_handle() {
+    ~Isolated_cache_handle() {
         cuda_err_chk(cudaFree(d_set_locks));
         cuda_err_chk(cudaFree(d_way_locks));
         cuda_err_chk(cudaFree(set_cnt_));
@@ -650,7 +648,7 @@ struct NVSHMEM_cache_handle{
     }
 
     __host__ 
-    NVSHMEM_cache_d_t<T>* 
+    Isolated_cache_d_t<T>* 
     get_ptr(){
         return cache_ptr;
     }

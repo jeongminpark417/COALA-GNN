@@ -61,7 +61,7 @@ def train( g, args, device, Comm_Manager, dim, page_size, num_classes, feat_shar
 
     train_nid = torch.nonzero(g.ndata['train_mask'], as_tuple=True)[0].clone()
     test_nid = torch.nonzero(g.ndata['test_mask'], as_tuple=True)[0].clone()
-    Node_Distributor_Manager = Node_Distributor(Comm_Manager, train_nid, args.batch_size, color_file, topk_file, score_file)
+    Node_Distributor_Manager = Node_Distributor(Comm_Manager, train_nid, args.batch_size, color_file, topk_file, score_file, parsing_method=args.distribution)
 
     sampler = dgl.dataloading.MultiLayerNeighborSampler(
                [int(fanout) for fanout in args.fan_out.split(',')]
@@ -200,18 +200,16 @@ if __name__ == '__main__':
         help='size of the datasets')
     parser.add_argument('--num_classes', type=int, default=19,
         choices=[19, 2983, 172, 128], help='number of classes')
-    parser.add_argument('--in_memory', type=int, default=0,
-        choices=[0, 1], help='0:read only mmap_mode=r, 1:load into memory')
-    parser.add_argument('--synthetic', type=int, default=0,
-        choices=[0, 1], help='0:nlp-node embeddings, 1:random')
+    # parser.add_argument('--in_memory', type=int, default=0,
+    #     choices=[0, 1], help='0:read only mmap_mode=r, 1:load into memory')
+    # parser.add_argument('--synthetic', type=int, default=0,
+    #     choices=[0, 1], help='0:nlp-node embeddings, 1:random')
     parser.add_argument('--data', type=str, default='IGB')
-    parser.add_argument('--emb_size', type=int, default=1024)
-    parser.add_argument('--shared', type=int, default=1,
-        choices=[0, 1], help='0:copy graph=r, 1:shared memory')
+    # parser.add_argument('--emb_size', type=int, default=1024)
+    # parser.add_argument('--shared', type=int, default=1,
+    #     choices=[0, 1], help='0:copy graph=r, 1:shared memory')
 
-    parser.add_argument('--device', type=int, default=0)
-    parser.add_argument('--uva', type=int, default=0)
-    parser.add_argument('--uva_graph', type=int, default=0)
+
 
     parser.add_argument('--model_type', type=str, default='sage',
                         choices=['gat', 'sage', 'gcn'])
@@ -235,7 +233,7 @@ if __name__ == '__main__':
     parser.add_argument('--num_ssd', type=int, default=1) 
     parser.add_argument('--cache_size', type=int, default=1024) 
 
-
+    parser.add_argument('--distribution', type=str, default='node_color')
 
     parser.add_argument('--eviction_policy', type=int, default=0)
 
@@ -283,8 +281,6 @@ if __name__ == '__main__':
             print("Unsupported Dataset")
         sys.exit(1)
     g.ndata['labels'] = g.ndata['label']
-
-    
 
     
     feat_data = None

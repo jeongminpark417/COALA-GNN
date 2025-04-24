@@ -141,7 +141,7 @@ class IGB260MDGLDataset(DGLDataset):
         node_edges = torch.from_numpy(dataset.paper_edge)
         node_labels = torch.from_numpy(dataset.paper_label).to(torch.long)
 
-        print("node edge:", node_edges)
+        #print("node edge:", node_edges)
         #cur_path = osp.join(self.dir, self.args.dataset_size, 'processed')
         # cur_path = '/mnt/nvme16/IGB260M_part_2/full/processed'
         # edge_row_idx = torch.from_numpy(np.load(cur_path + '/paper__cites__paper/edge_index_csc_row_idx.npy'))
@@ -154,17 +154,13 @@ class IGB260MDGLDataset(DGLDataset):
         # else:
         
         self.graph = dgl.graph((node_edges[:, 0],node_edges[:, 1]), num_nodes=node_features.shape[0])
-        print("self graph: ", self.graph.formats()) 
-        print("skipping feat")
         self.graph.ndata['feat'] = node_features
         
 
         self.graph.ndata['label'] = node_labels
-        print("self graph2: ", self.graph.formats())
         if self.args.dataset_size != 'full':
             self.graph = dgl.remove_self_loop(self.graph)
             self.graph = dgl.add_self_loop(self.graph)
-        print("self graph3: ", self.graph.formats())
         
         if self.args.dataset_size == 'full':
             #TODO: Put this is a meta.pt file
@@ -291,7 +287,7 @@ class IGBDatast_Shared_UVA(DGLDataset):
         if(self.local_rank == 0):
             edge_path = osp.join(self.dir, self.size, 'processed', 'paper__cites__paper', 'edge_index.npy')
             edge_array = np.load(edge_path)
-            print(f"edge type: {edge_array.dtype} Bytes: {edge_array.nbytes}, Shape: {edge_array.shape}")
+            #print(f"edge type: {edge_array.dtype} Bytes: {edge_array.nbytes}, Shape: {edge_array.shape}")
             edge_array_size[0] = edge_array.nbytes
             edge_shape_list = np.array(edge_array.shape)
 
@@ -306,22 +302,22 @@ class IGBDatast_Shared_UVA(DGLDataset):
 
         self.shared_UVA_manager = Shared_UVA_Tensor_Manager(self.comm_manager, "/shared_mem", edge_array_size[0])
         node_edges = self.shared_UVA_manager.get_tensor(dtype=cp.int64, tensor_shape=edge_shape)
-        print(f"node edges shape: {node_edges.shape} device: {node_edges.device} array: {node_edges}" )
+        #print(f"node edges shape: {node_edges.shape} device: {node_edges.device} array: {node_edges}" )
         self.shared_UVA_manager.write_np_array(node_edges, edge_array)
-        print(f"After COPY node edges shape: {node_edges.shape} device: {node_edges.device} array: {node_edges}" )
+        #print(f"After COPY node edges shape: {node_edges.shape} device: {node_edges.device} array: {node_edges}" )
         del edge_array
 
         gc.collect()
-        print("Freed local graph data")
+        #print("Freed local graph data")
 
         node_labels = torch.from_numpy(self.get_label()).to(torch.long).to(self.device)
 
         n_nodes = self.num_nodes()
-        print("Number of Nodes: ", n_nodes)
+        #print("Number of Nodes: ", n_nodes)
         self.graph = dgl.graph((node_edges[:, 0],node_edges[:, 1]), num_nodes=n_nodes)
         self.graph.ndata['label'] = node_labels
         self.graph  = self.graph.formats('csc')
-        print(self.graph.formats())
+        #print(self.graph.formats())
 
 
         if self.args.dataset_size == 'full':
@@ -527,7 +523,7 @@ class IGBDatast_Shared_CSC_UVA(DGLDataset):
         self.graph = dgl.graph(('csc',(csc_indptr, csc_indicies, edge_ids_indicies)), num_nodes=n_nodes, idtype=torch.int64, device=self.device)
         self.graph  = self.graph.formats('csc')
         self.graph.ndata['label'] = node_labels
-        print(self.graph.formats())
+        #print(self.graph.formats())
 
 
 

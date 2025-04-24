@@ -19,6 +19,7 @@
 #include "nvshmem_manager.cuh"
 
 #define BLOCK_SIZE 256
+
 namespace py = pybind11;
 
 
@@ -38,6 +39,12 @@ PYBIND11_MODULE(COALA_GNN_Pybind, m) {
         .def("read_feature", &SSD_GNN_NVSHMEM_Cache::read_feature)
         .def("get_cache_data", &SSD_GNN_NVSHMEM_Cache::get_cache_data)
         .def("print_stats", &SSD_GNN_NVSHMEM_Cache::print_stats);
+
+    py::class_<Isolated_Cache>(m, "Isolated_Cache")
+        .def(py::init<SSD_GNN_SSD_Controllers, Node_distributor_pybind&, int, int, uint64_t, uint64_t>())
+        .def("read_feature", &Isolated_Cache::read_feature)
+        .def("get_cache_data", &Isolated_Cache::get_cache_data)
+        .def("print_stats", &Isolated_Cache::print_stats);
         
     py::class_<Node_distributor_pybind>(m, "Node_distributor_pybind")
         .def(py::init<uint64_t, int>()) 

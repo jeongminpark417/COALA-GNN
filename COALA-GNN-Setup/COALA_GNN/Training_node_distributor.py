@@ -39,8 +39,11 @@ class Node_Distributor(object):
 
     def parse_domain_training_nodes(self, color_buf_read_header):
         if(self.parsing_method == "baseline"):
-            self.parsed_training_nodes_buffer[self.parsed_training_nodes_buffer_header] = self.index_tensor[self.index_offset + system_world_size*i + domain_id]
+            node_id = self.comm_manager.master_process_index
+            self.parsed_training_nodes_buffer[self.parsed_training_nodes_buffer_header] = self.index_tensor[(self.index_offset + node_id*self.domain_batch_size):(self.index_offset + (node_id + 1) * self.domain_batch_size)]
             self.index_offset += self.global_batch_size
+            print(f"parsed node: {self.parsed_training_nodes_buffer[self.parsed_training_nodes_buffer_header]}")
+
             return self.parsed_training_nodes_buffer[self.parsed_training_nodes_buffer_header]
 
         elif(self.parsing_method == "node_color"):
