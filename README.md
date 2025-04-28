@@ -77,13 +77,10 @@ srun --label python sbatch_ssd_gnn_train.py --path $IGB_DATA_PATH  --dataset_siz
 ```
 ### Scripts
 The following scripts are used to run COALA-GNN with different configurationns. Users can run sbatch with these scripts. Please double check SBATCH parameters for the environment, such as account, partitions, or times.
-- IGB_4GB_script.sh (running IGB dataset with 4GB cache size)
-- IGB_16GB_script.sh (running IGB dataset with 16GB cache size)
-- OGB_4GB_script.sh (running OGB dataset with 4GB cache size)
-- OGB_16GB_script.sh (running OGB dataset with 16GB cache size)
-- Cache_compare_script.sh (compare NVSHMEM-based cache, NCCL-based cache, and Isolated cache)
-- Distribution_compare_script.sh (compare dynamic node distribuiton vs baseline striping)
-- Pipeline_compare_script.sh (compare when pipeline is on and off)
+- 4GB_script.sh (running COALA-GNN with 4GB cache size). Output is written in 4g_coala_out.txt
+- 16GB_script.sh (running COALA-GNN with 16GB cache size). Output is written in 16g_coala_out.txt
+- Cache_compare_script.sh (compare NVSHMEM-based cache, NCCL-based cache, and Isolated cache). Output is written in cache_bench_out.txt
+- Distribution_compare_script.sh (compare dynamic node distribuiton vs baseline striping). Output is written in distribution_out.txt
   
 
 
