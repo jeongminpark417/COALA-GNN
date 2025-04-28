@@ -38,11 +38,18 @@ Once the BaM system is set up, users need to create Pybind modules for COALA-GNN
 ```
 cd COALA_GNN_Modules
 mkdir build
-cmake .. && make -j
+cmake -DNVSHMEM_HOME=${NVSHMEM_PATH} ..
+make -j
 cd COALA_GNN_Pybind
 pip install .
 ```
 
+If CMAKE cannot find Pybind and MPI4py packages, run the following command instead. Make sure that you are using the correct path for NVSHMEM_PATH.
+```
+cmake -DMPI4Py_INCLUDE_DIR=$(python -c "import mpi4py; print(mpi4py.get_include())") \
+      -DNVSHMEM_HOME=${NVSHMEM_PATH} \
+      -Dpybind11_DIR=$(python -c "import pybind11; print(pybind11.get_cmake_dir())") ..
+```
 Afterwards, users can set up the Python interface for COALA-GNN Dataloader by running the following command from the root directory:
 
 ```
@@ -77,13 +84,10 @@ srun --label python sbatch_ssd_gnn_train.py --path $IGB_DATA_PATH  --dataset_siz
 ```
 ### Scripts
 The following scripts are used to run COALA-GNN with different configurationns. Users can run sbatch with these scripts. Please double check SBATCH parameters for the environment, such as account, partitions, or times.
-- IGB_4GB_script.sh (running IGB dataset with 4GB cache size)
-- IGB_16GB_script.sh (running IGB dataset with 16GB cache size)
-- OGB_4GB_script.sh (running OGB dataset with 4GB cache size)
-- OGB_16GB_script.sh (running OGB dataset with 16GB cache size)
-- Cache_compare_script.sh (compare NVSHMEM-based cache, NCCL-based cache, and Isolated cache)
-- Distribution_compare_script.sh (compare dynamic node distribuiton vs baseline striping)
-- Pipeline_compare_script.sh (compare when pipeline is on and off)
+- 4GB_script.sh (running COALA-GNN with 4GB cache size). Output is written in 4g_coala_out.txt
+- 16GB_script.sh (running COALA-GNN with 16GB cache size). Output is written in 16g_coala_out.txt
+- Cache_compare_script.sh (compare NVSHMEM-based cache, NCCL-based cache, and Isolated cache). Output is written in cache_bench_out.txt
+- Distribution_compare_script.sh (compare dynamic node distribuiton vs baseline striping). Output is written in distribution_out.txt
   
 
 
