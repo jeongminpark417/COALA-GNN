@@ -61,6 +61,10 @@ def train( g, args, device, Comm_Manager, dim, page_size, num_classes, feat_shar
 
     train_nid = torch.nonzero(g.ndata['train_mask'], as_tuple=True)[0].clone()
     test_nid = torch.nonzero(g.ndata['test_mask'], as_tuple=True)[0].clone()
+
+    train_nid = train_nid[torch.randperm(train_nid.size(0))]
+
+
     Node_Distributor_Manager = Node_Distributor(Comm_Manager, train_nid, args.batch_size, color_file, topk_file, score_file, parsing_method=args.distribution)
 
     sampler = dgl.dataloading.MultiLayerNeighborSampler(
@@ -85,7 +89,8 @@ def train( g, args, device, Comm_Manager, dim, page_size, num_classes, feat_shar
                         fan_out,
                         cache_size,
                         device,
-                        cache_backend = "nvshmem",
+                        refresh_counter = args.refresh_counter,
+                        cache_backend = args.cache_backend,
                         sim_buf = feat_shared_uva,
                         shuffle = False)
 
@@ -148,7 +153,7 @@ def train( g, args, device, Comm_Manager, dim, page_size, num_classes, feat_shar
     Comm_Manager.global_comm.Barrier()
     del train_loader
     
-    Test_Node_Distributor_Manager = Node_Distributor(Comm_Manager, test_nid, args.batch_size, color_file, topk_file, score_file)
+    Test_Node_Distributor_Manager = Node_Distributor(Comm_Manager, test_nid, args.batch_size, color_file, topk_file, score_file, parsing_method=args.distribution)
     test_loader = COALA_GNN_DataLoader(
                     SSD_manager,
                     Test_Node_Distributor_Manager, 
@@ -159,7 +164,8 @@ def train( g, args, device, Comm_Manager, dim, page_size, num_classes, feat_shar
                     fan_out,
                     cache_size,
                     device,
-                    cache_backend = "nvshmem",
+                    refresh_counter = args.refresh_counter,
+                    cache_backend =  args.cache_backend,
                     sim_buf = feat_shared_uva,
                     shuffle = False)
 
@@ -234,8 +240,9 @@ if __name__ == '__main__':
     parser.add_argument('--cache_size', type=int, default=1024) 
 
     parser.add_argument('--distribution', type=str, default='node_color')
+    parser.add_argument('--cache_backend', type=str, default='nvshmem')
+    parser.add_argument('--refresh_counter', type=int, default=10)
 
-    parser.add_argument('--eviction_policy', type=int, default=0)
 
     parser.add_argument('--feat_cpu', action='store_true', help='Store features on CPU')
 
@@ -257,7 +264,7 @@ if __name__ == '__main__':
     dim = 0
     torch.cuda.set_device(device)
 
-    Comm_Manager.initialize_nested_process_group()
+    Comm_Manager.initialize_nested_process_group(args.cache_backend)
 
 
     if(args.data == 'IGB'):

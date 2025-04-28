@@ -45,6 +45,9 @@ PYBIND11_MODULE(COALA_GNN_Pybind, m) {
         .def(py::init<SSD_GNN_SSD_Controllers, Node_distributor_pybind&, int, int, uint64_t, uint64_t>())
         .def("read_feature", &Isolated_Cache::read_feature)
         .def("get_cache_data", &Isolated_Cache::get_cache_data)
+        .def("split_node_list", &Isolated_Cache::split_node_list)
+        .def("nccl_get_feature", &Isolated_Cache::nccl_get_feature)
+        .def("map_feat_data", &Isolated_Cache::map_feat_data)
         .def("print_stats", &Isolated_Cache::print_stats);
         
     py::class_<Node_distributor_pybind>(m, "Node_distributor_pybind")

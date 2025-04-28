@@ -72,13 +72,69 @@ void Isolated_read_feature_kernel( Cache_Type *cache, float *out_tensor_ptr,
     uint64_t tid = threadIdx.x % 32;
     //    get_data(uint64_t id, T* output_ptr, int rank, int dst_gpu){
    // printf("tid: %i row_index:%i\n", (int) idx_idx, (int) row_index);
-    cache->get_data(idx_idx, out_tensor_ptr + (batch_idx) * dim);
+    cache->get_data(batch_idx, out_tensor_ptr + (idx_idx) * dim);
   } 
 }
 
+__global__
+void nccl_split_node_list_kernel (int64_t* index_ptr, int64_t index_size, int64_t* node_ptr, int64_t* map_ptr, int64_t* counter_ptr,
+                              int local_size, int max_sample){
+  uint64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+
+  if(idx < index_size){
+    int64_t cur_node = index_ptr[idx];
+    int64_t gpu_id = cur_node % local_size;
+    unsigned long long int enq_idx = atomicAdd((unsigned long long int*) (counter_ptr + gpu_id), (unsigned long long int)1);
+    node_ptr[max_sample*gpu_id + enq_idx] = cur_node;
+    map_ptr[max_sample*gpu_id + enq_idx] = idx;
+  }                            
+}
+
+template<typename Cache_Type>
+__global__
+void nccl_read_feature_kernel(Cache_Type *cache, float *out_tensor_ptr, int64_t* index_ptr, int64_t num_idx,
+                              int rank, int dim, int local_size){
+    uint64_t bid = blockIdx.x;
+    int num_warps = blockDim.x / 32;
+    int warp_id = threadIdx.x / 32;
+    int idx_idx = bid * num_warps + warp_id;
+
+    if (idx_idx < num_idx) {
+      //Request is a pair (node id, batch idx)
+      int64_t batch_idx = index_ptr[idx_idx];
+      uint64_t tid = threadIdx.x % 32;
+      //    get_data(uint64_t id, T* output_ptr, int rank, int dst_gpu){
+    // printf("tid: %i row_index:%i\n", (int) idx_idx, (int) row_index);
+      cache->get_data(batch_idx, out_tensor_ptr + (idx_idx) * dim, local_size, true);
+    } 
+
+}
+
+template <typename T = float>
+ __forceinline__
+__device__
+void block_memcpy(void* dst, void* src, size_t size){
+     T* src_ptr = (T*) src;
+     T* dst_ptr = (T*) dst;
+     
+     uint32_t count = blockDim.x;     
+     uint32_t my_id = threadIdx.x;
+
+     for(; my_id < size; my_id += count){
+          dst_ptr[my_id] =  src_ptr[my_id]; 
+     }
+ }
 
 
+__global__
+void nccl_gather_feature_kernel(float *out_tensor_ptr, float* src_tensor_ptr, uint64_t* meta_buffer, int dim, int64_t num_idx, int rank) {
+  uint64_t r_idx = blockIdx.x;
+  if(r_idx < num_idx){
+    uint64_t dst_idx = meta_buffer[r_idx];
+    block_memcpy<ulonglong4>((void*) (out_tensor_ptr + dst_idx * dim), (void*)(src_tensor_ptr + r_idx * dim), dim * sizeof(float) / sizeof(ulonglong4) );
 
+  }
+}
 
 template<typename Cache_Type>
 __global__

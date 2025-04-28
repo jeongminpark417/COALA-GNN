@@ -257,9 +257,10 @@ class Isolated_Cache {
             float *tensor_ptr = (float *) i_return_tensor_ptr;
             int64_t *index_ptr = (int64_t *)i_index_ptr;
         
-            int b_size = 64;
-            uint64_t g_size = (max_index+b_size - 1) / b_size;
-            uint64_t bid = blockIdx.x;
+            uint64_t b_size = 128;
+            uint64_t n_warp = b_size / 32;
+            uint64_t g_size = (max_index+n_warp - 1) / n_warp;
+
 
             Isolated_read_feature_kernel<<<g_size, b_size>>>(cache_ptr, tensor_ptr, index_ptr, dim, max_index, cache_dim);
             cuda_err_chk(cudaDeviceSynchronize());
@@ -278,9 +279,88 @@ class Isolated_Cache {
             return;
         }
 
+        // NCCL Cache Communication functions
+        void split_node_list(uint64_t i_index_ptr, int64_t index_size, 
+                    uint64_t i_node_tensor, uint64_t i_map_tensor, uint64_t i_counter_tensor, int local_size, int max_sample){
+            
+            int64_t* index_ptr = (int64_t *)i_index_ptr;
+            int64_t* node_ptr = (int64_t *) i_node_tensor;
+            int64_t* map_ptr = (int64_t *) i_map_tensor;
+            int64_t* counter_ptr = (int64_t *) i_counter_tensor;
+
+            size_t g_size = (index_size + 1023)/1024;
+
+            nccl_split_node_list_kernel<<<g_size,1024>>>(index_ptr, index_size, node_ptr, map_ptr, counter_ptr, local_size, max_sample);
+            cuda_err_chk(cudaDeviceSynchronize());
+        }
+
+        void nccl_get_feature(const std::vector<uint64_t>&  i_index_ptr_list, const std::vector<uint64_t>&  i_return_ptr_list, const std::vector<uint64_t>&  index_size_list,
+                               int local_size, int max_sample){
+            
+            cudaStream_t streams[local_size];
+            for (int i = 0; i < local_size; i++) {
+                cudaStreamCreate(&streams[i]);
+            }
+
+            cuda_err_chk(cudaDeviceSynchronize());
+
+            for (int i = 0; i < local_size; i++) {
+            
+                float *tensor_ptr = (float *)(i_return_ptr_list[i]);
+                int64_t *index_ptr = (int64_t *)(i_index_ptr_list[i]);
+                uint64_t index_size = index_size_list[i];
+
+                uint64_t b_size = 128;
+                uint64_t n_warp = b_size / 32;
+                uint64_t g_size = (index_size+n_warp - 1) / n_warp;
+
+                nccl_read_feature_kernel<<<g_size, b_size, 0, streams[i]>>>(cache_ptr, tensor_ptr, index_ptr,
+                                     index_size, i, dim, local_size);
+            }
+
+            cuda_err_chk(cudaDeviceSynchronize());
+            for (int i = 0; i < local_size; i++) {
+                cudaStreamDestroy(streams[i]);
+            }
+        }
+
+        void map_feat_data(uint64_t i_return_ptr, const std::vector<uint64_t>&  i_return_ptr_list, uint64_t  i_meta_buffer,
+                             const std::vector<uint64_t>&  index_size_list, int local_size,  int max_sample){
+
+            float* final_tensor_ptr = (float *)i_return_ptr;
+            cudaStream_t streams[local_size];
+            for (int i = 0; i < local_size; i++) {
+                cudaStreamCreate(&streams[i]);
+            }
+            
+            cuda_err_chk(cudaDeviceSynchronize());
+
+            for (int i = 0; i < local_size; i++) {
+                float* src_tensor_ptr = (float *)(i_return_ptr_list[i]);
+                uint64_t index_size = index_size_list[i];
+
+                uint64_t* d_meta_buffer_ptr =  (uint64_t* ) (i_meta_buffer);
+                d_meta_buffer_ptr += i * max_sample;
+
+                uint64_t b_size = 256;
+                uint64_t g_size = index_size;
+                nccl_gather_feature_kernel<<<g_size, b_size, 0, streams[i]>>>(final_tensor_ptr, src_tensor_ptr,
+                                                            d_meta_buffer_ptr, dim, index_size, i);
+            }
+
+            cuda_err_chk(cudaDeviceSynchronize());
+            for (int i = 0; i < local_size; i++) {
+                cudaStreamDestroy(streams[i]);
+            }
+            
+        }
+
         void print_stats(){
             print_stats_kernel<<<1,1>>>(cache_ptr);
         }
+
+
+
 
         ~Isolated_Cache(){
             cudaFree(d_request_counters);

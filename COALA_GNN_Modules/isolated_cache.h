@@ -335,14 +335,18 @@ struct Isolated_cache_d_t {
     __forceinline__
     __device__
     void 
-    get_data(uint64_t id, T* output_ptr){
+    get_data(uint64_t id, T* output_ptr, int n_gpus = 1, bool nccl_cache = false){
 
         uint32_t lane = lane_id();
         uint32_t mask = __activemask();
 
         uint64_t cl_id = id ;
-
-        uint64_t set_id = get_set_id(cl_id);
+        uint64_t set_id;
+        if(nccl_cache){
+            set_id = get_dist_set_id(cl_id, n_gpus);
+        }
+        else    
+            set_id = get_set_id(cl_id);
         uint64_t set_offset = set_id * (num_ways);
         seqlock* cur_set_lock = set_locks_ + set_id;
         seqlock* cur_cl_seqlock = way_locks_ + set_id * (num_ways );
