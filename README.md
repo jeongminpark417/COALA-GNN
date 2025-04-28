@@ -38,11 +38,18 @@ Once the BaM system is set up, users need to create Pybind modules for COALA-GNN
 ```
 cd COALA_GNN_Modules
 mkdir build
-cmake .. && make -j
+cmake -DNVSHMEM_HOME=${NVSHMEM_PATH} ..
+make -j
 cd COALA_GNN_Pybind
 pip install .
 ```
 
+If CMAKE cannot find Pybind and MPI4py packages, run the following command instead. Make sure that you are using the correct path for NVSHMEM_PATH.
+```
+cmake -DMPI4Py_INCLUDE_DIR=$(python -c "import mpi4py; print(mpi4py.get_include())") \
+      -DNVSHMEM_HOME=${NVSHMEM_PATH} \
+      -Dpybind11_DIR=$(python -c "import pybind11; print(pybind11.get_cmake_dir())") ..
+```
 Afterwards, users can set up the Python interface for COALA-GNN Dataloader by running the following command from the root directory:
 
 ```
