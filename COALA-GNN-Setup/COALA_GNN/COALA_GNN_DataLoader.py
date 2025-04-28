@@ -100,11 +100,13 @@ class COALA_GNN_DataLoader(torch.utils.data.DataLoader):
                  fan_out,
                  cache_size, # In MB
                  device,
+                 refresh_counter = 10,
                  cache_backend = "nvshmem",
                  sim_buf = None,
                  shuffle=False,
                  ):
 
+        self.refresh_counter = refresh_counter
         self.sampler = graph_sampler
         self.batch_size = batch_size
         self.g = graph
@@ -132,7 +134,7 @@ class COALA_GNN_DataLoader(torch.utils.data.DataLoader):
         self.scheduler = COALA_GNN_Node_Distribution_Scheduler(
                             node_distributor = self.node_distributor,
                             ssd_gnn_manager = self.COALA_GNN_Manager,
-                            refresh_counter = 8
+                            refresh_counter = self.refresh_counter
                         )
         self.counter = 0
         self.index_len = len(self.node_distributor.index_tensor)
@@ -167,7 +169,10 @@ class COALA_GNN_DataLoader(torch.utils.data.DataLoader):
 
     def print_stats(self):
         self.COALA_GNN_Manager.print_stats()
-
+        agg_time = self.COALA_GNN_Manager.get_aggregate_time()
+        print(f"Aggregation time: {agg_time}")
+        self.COALA_GNN_Manager.aggregation_timer = 0.0
+    
     def __del__(self):
         del self.COALA_GNN_Manager
         

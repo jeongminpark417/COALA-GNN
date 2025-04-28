@@ -42,7 +42,7 @@ class Node_Distributor(object):
             node_id = self.comm_manager.master_process_index
             self.parsed_training_nodes_buffer[self.parsed_training_nodes_buffer_header] = self.index_tensor[(self.index_offset + node_id*self.domain_batch_size):(self.index_offset + (node_id + 1) * self.domain_batch_size)]
             self.index_offset += self.global_batch_size
-            print(f"parsed node: {self.parsed_training_nodes_buffer[self.parsed_training_nodes_buffer_header]}")
+            #print(f"parsed node: {self.parsed_training_nodes_buffer[self.parsed_training_nodes_buffer_header]}")
 
             return self.parsed_training_nodes_buffer[self.parsed_training_nodes_buffer_header]
 

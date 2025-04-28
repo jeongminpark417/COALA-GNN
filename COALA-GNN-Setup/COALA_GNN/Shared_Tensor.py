@@ -57,8 +57,9 @@ class MPI_Comm_Manager(object):
 
         self.local_gloo_scatter_array = []
         self.local_gloo_gather_array = []
+        self.nccl_cache_gather_array = []
 
-    def initialize_nested_process_group(self):
+    def initialize_nested_process_group(self, cache_backend = "nvshmem"):
         dist.init_process_group("nccl", world_size=self.global_size, rank=self.global_rank)
         dist.barrier()
 
@@ -72,16 +73,25 @@ class MPI_Comm_Manager(object):
             self.local_gloo_gather_array.append(dist.new_group(ranks=self.global_dist_local_rank_list[counter], backend='gloo'))
             dist.barrier(self.local_gloo_gather_array[counter])
             dist.barrier()
+            if(cache_backend == "nccl"):
+                self.nccl_cache_gather_array.append(dist.new_group(ranks=self.global_dist_local_rank_list[counter], backend='nccl'))
+                dist.barrier(self.local_gloo_gather_array[counter])
+                dist.barrier()
+
             counter += 1
 
         self.local_gloo_gather = self.local_gloo_gather_array[self.master_process_index]
         self.local_gloo_scatter = self.local_gloo_scatter_array[self.master_process_index]
+        
+        if(cache_backend == "nccl"):
+            self.nccl_cache_gather = self.nccl_cache_gather_array[self.master_process_index]
 
 
         self.master_gloo_gather = dist.new_group(ranks=self.master_process_list, backend='gloo')
         dist.barrier(self.master_gloo_gather)
-
         dist.barrier()
+
+
 
     def gather_cache_meta(self, gpu_cache_meta, gathered_data):
         dist.all_reduce(gpu_cache_meta, op=dist.ReduceOp.SUM, group=self.local_gloo_gather)
