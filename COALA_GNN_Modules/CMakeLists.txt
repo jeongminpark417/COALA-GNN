@@ -25,7 +25,15 @@ message(STATUS "MPI4Py Include Path: ${MPI4Py_INCLUDE_DIR}")
 
 #$set(NVSHMEM_HOME "/usr/lib/x86_64-linux-gnu/")
 #set(NVSHMEM_HOME "/usr/local/nvshmem")
-set(NVSHMEM_HOME "/u/jpark346/nvshmem")
+#set(NVSHMEM_HOME "/u/jpark346/nvshmem")
+
+set(NVSHMEM_HOME "" CACHE PATH "Path to NVSHMEM installation")
+
+# Check if NVSHMEM_HOME is set
+if(NOT NVSHMEM_HOME)
+	    message(FATAL_ERROR "Please set NVSHMEM_HOME using -DNVSHMEM_HOME=/path/to/nvshmem when running cmake.")
+    endif()
+
 
 set(NVSHMEM_HOST_LIB "${NVSHMEM_HOME}/lib/libnvshmem_host.so")
 set(NVSHMEM_DEVICE_LIB "${NVSHMEM_HOME}/lib/libnvshmem_device.a")
