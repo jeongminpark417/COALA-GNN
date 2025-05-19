@@ -361,55 +361,63 @@ struct NVSHMEM_cache_d_t {
             set_before = __shfl_sync(mask, set_before, warp_leader);
             unsigned way = search_ways(cl_id, mask, set_id);
 
+           // if(threadIdx.x == 0) printf("search way : %i set before: %llu\n", (int) way, (unsigned long long) set_before);
+
             if(way < num_ways){
-                if(way < num_ways){
-
-                    seqlock* way_lock = way_locks_ + set_offset + way;
-                    uint64_t way_before;
-                    if(lane == warp_leader) {
-                        way_before = way_lock->read_begin();
-                    }
-                    way_before = __shfl_sync(mask, way_before, warp_leader);
-
-                    bool hit = false;
-                    auto way_offset = set_offset + way;
-                    auto way_key = keys_ + way_offset;
-
-                    if(cl_id == (*way_key)){
-                        hit = true;
-                        void* src = ((void*)base_addr_)+ (set_offset + way) * CL_SIZE;
-                        nvshmemx_float_put_warp(output_ptr, (float*) src, CL_SIZE/sizeof(float), dst_gpu);
-                    }
-
-                    __syncwarp(mask);
-
-                    //uint64_t way_after;
-                    bool way_not_modified;
-                    if(lane == warp_leader) {
-                        //way_after = way_lock->read_busy_unlock();
-                        way_not_modified = way_lock -> read_retry(way_before);
-                    }
-                    way_not_modified = __shfl_sync(mask, way_not_modified, warp_leader);
-
-                    if(!done)
-                        done = hit && way_not_modified;
-
-                    unsigned not_done_mask = __ballot_sync(mask, !done);
-                    if(not_done_mask == 0){
-                        if(lane == warp_leader)
-                            hit_cnt.fetch_add(1, simt::memory_order_relaxed);
-                        return;
-                    }
+                
+                seqlock* way_lock = way_locks_ + set_offset + way;
+                uint64_t way_before;
+                if(lane == warp_leader) {
+                    way_before = way_lock->read_begin();
                 }
+               // if(threadIdx.x == 0) printf("read lock : %i\n", (int) way_before);
+
+                way_before = __shfl_sync(mask, way_before, warp_leader);
+
+                bool hit = false;
+                auto way_offset = set_offset + way;
+                auto way_key = keys_ + way_offset;
+
+                if(cl_id == (*way_key)){
+                    hit = true;
+                    void* src = ((void*)base_addr_)+ (set_offset + way) * CL_SIZE;
+                    nvshmemx_float_put_warp(output_ptr, (float*) src, CL_SIZE/sizeof(float), dst_gpu);
+                }
+
+                __syncwarp(mask);
+
+                //uint64_t way_after;
+                bool way_modified;
+                if(lane == warp_leader) {
+                    //way_after = way_lock->read_busy_unlock();
+                    way_modified = way_lock -> read_retry(way_before);
+                }
+                //if(threadIdx.x == 0) printf("read lock check : %i\n", (int) way_modified);
+                way_modified = __shfl_sync(mask, way_modified, warp_leader);
+
+                if(!done)
+                    done = hit && (!way_modified);
+
+                unsigned not_done_mask = __ballot_sync(mask, !done);
+                if(not_done_mask == 0){
+                    if(lane == warp_leader)
+                        hit_cnt.fetch_add(1, simt::memory_order_relaxed);
+                    return;
+                }
+            
             }
-            bool set_not_modified;
-            if(lane == warp_leader) set_not_modified = cur_set_lock->read_retry(set_before);
-            set_not_modified = __shfl_sync(mask, set_not_modified, warp_leader);
-            retry = !set_not_modified;
+            bool set_modified;
+            if(lane == warp_leader) set_modified = cur_set_lock->read_retry(set_before);
+            set_modified = __shfl_sync(mask, set_modified, warp_leader);
+            //if(threadIdx.x == 0) printf("set_modified: %i\n", (int)set_modified);
+
+            retry = set_modified;
         } while(retry);
 
         //miss
         
+        //if(threadIdx.x == 0) printf("Cache miss\n");
+
         if(lane == warp_leader) {
             cur_set_lock->write_begin();
         }

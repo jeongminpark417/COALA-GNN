@@ -109,7 +109,7 @@ def train( g, args, device, Comm_Manager, dim, page_size, num_classes, feat_shar
         model = GAT(dim, args.hidden_channels, num_classes, 
             args.num_layers,  args.num_heads).to(device)
 
-    model = torch.nn.parallel.DistributedDataParallel(model)
+    model = torch.nn.parallel.DistributedDataParallel(model, find_unused_parameters=True)
 
 
     loss_fcn = nn.CrossEntropyLoss().to(device)
@@ -131,7 +131,7 @@ def train( g, args, device, Comm_Manager, dim, page_size, num_classes, feat_shar
 
             if(step % 100 == 0):
                 print(f"Rank: {Comm_Manager.local_rank} step: {step}")
-
+      
 
             count += 1
             

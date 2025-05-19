@@ -388,15 +388,15 @@ struct Isolated_cache_d_t {
                     __syncwarp(mask);
 
                     uint64_t way_after;
-                    bool way_not_modified;
+                    bool way_modified;
                     if(lane == warp_leader) {
                         //way_after = way_lock->read_busy_unlock();
-                        way_not_modified = way_lock -> read_retry(way_before);
+                        way_modified = way_lock -> read_retry(way_before);
                     }
-                    way_not_modified = __shfl_sync(mask, way_not_modified, warp_leader);
+                    way_modified = __shfl_sync(mask, way_modified, warp_leader);
 
                     if(!done)
-                        done = hit && way_not_modified;
+                        done = hit && (!way_modified);
 
                     unsigned not_done_mask = __ballot_sync(mask, !done);
                     if(not_done_mask == 0){
@@ -406,10 +406,10 @@ struct Isolated_cache_d_t {
                     }
                 }
             }
-            bool set_not_modified;
-            if(lane == warp_leader) set_not_modified = cur_set_lock->read_retry(set_before);
-            set_not_modified = __shfl_sync(mask, set_not_modified, warp_leader);
-            retry = !set_not_modified;
+            bool set_modified;
+            if(lane == warp_leader) set_modified = cur_set_lock->read_retry(set_before);
+            set_modified = __shfl_sync(mask, set_modified, warp_leader);
+            retry = set_modified;
         } while(retry);
 
         //miss

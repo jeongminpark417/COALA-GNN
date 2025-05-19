@@ -32,8 +32,11 @@ struct seqlock {
         return seq;
     }
     __device__
-    bool read_retry(uint32_t start_seq) const {
-        return sequence.load(simt::memory_order_acquire) != start_seq;
+    bool read_retry(uint64_t start_seq) const {
+        uint64_t load_val = sequence.load(simt::memory_order_acquire);
+        //printf("load val: %llu start_seq : %llu\n", load_val, (unsigned long long) start_seq);
+        return load_val != start_seq;
+        //return sequence.load(simt::memory_order_acquire) != start_seq;
     }
 };
 
